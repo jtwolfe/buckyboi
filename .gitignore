@@ -1,0 +1,13 @@
+/rust/target
+/target
+**/__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+/bend/*.c
+/bend/*.js
+/bend/icosahedron
+/icosahedron
+/python/.venv
+*.onnx
+.buckyboi-models/
