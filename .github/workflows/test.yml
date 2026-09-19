@@ -1,0 +1,18 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cargo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev pkg-config
+      - name: test (default gaze)
+        run: cargo test --manifest-path rust/Cargo.toml
+      - name: test (no default features)
+        run: cargo test --manifest-path rust/Cargo.toml --no-default-features
