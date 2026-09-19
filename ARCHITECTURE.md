@@ -6,9 +6,14 @@ toy and are not on the overlay / identity path.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  X11 overlay (bin: buckyboi)                                │
-│  ARGB + Shape/XFixes click-through, Esc quits               │
+│  overlay (bin: buckyboi)                                    │
+│  Wayland wlr-layer-shell  |  X11 Shape/XFixes               │
+│  click-through hit disks, Esc / --quit                      │
 │                                                             │
+│   display/      backend pick + present + wake socket        │
+│   display/wayland.rs   zwlr_layer_shell_v1 overlay + shm    │
+│   display/x11.rs       ARGB + Shape/XFixes                  │
+│   display/wake.rs      Hyprland IPC + UNIX sock + SIGUSR1   │
 │   sim.rs        icosahedron physics (SPEC.md)               │
 │   ux.rs         VisibleIdle / Listening / Hidden            │
 │   gaze.rs       look-target + dwell lock (pure)             │
@@ -116,6 +121,26 @@ and pull `ort` binaries only when those features are requested.
 
 ## Display
 
-X11 (Shape + XFixes + 32-bit ARGB) is required for the overlay and for
-global wake. XWayland usually works. Native Wayland is refused at
-startup — there is no portable “any key / mouse anywhere” wake.
+Runtime pick (`display::select_backend_kind`):
+
+1. `BUCKYBOI_DISPLAY=wayland|x11|auto` (optional force).
+2. If `WAYLAND_DISPLAY` is set, bind `zwlr_layer_shell_v1` (overlay
+   layer, all anchors, exclusive zone 0, namespace `buckyboi`). Software
+   pixels go through `wl_shm` (`Argb8888`, same BGRA layout as X11
+   `PutImage`). Input: `wl_surface.set_input_region` = buddy disks.
+3. If layer-shell is missing and `DISPLAY` is set, fall back to X11
+   Shape + XFixes.
+4. Else X11 only.
+
+Both backends always compile so CI covers them. Multi-output: one
+layer on the compositor-default / focused head.
+
+### Wayland wake
+
+There is no portable “any key / mouse anywhere” protocol. On
+Hyprland / Omarchy the process polls `cursorpos` on the IPC socket and
+listens on `$XDG_RUNTIME_DIR/buckyboi.sock` (`buckyboi --wake` /
+`SUPER+B`). SIGUSR1 is the same wake. Documented in
+`contrib/omarchy/`. Other wlroots compositors get the socket + signal
+path; mouse-avoid while the pointer is *not* over a hit disk needs a
+compositor cursor query (Hyprland only today).

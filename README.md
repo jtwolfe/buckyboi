@@ -12,13 +12,16 @@ cargo test --manifest-path rust/Cargo.toml
 cargo run --release --manifest-path rust/Cargo.toml
 ```
 
-`DISPLAY` must be set. The binary is `buckyboi`. `buckyboi --help` prints
-usage. Feature flags keep thin builds working without ONNX or a mic.
+`WAYLAND_DISPLAY` (Hyprland / wlroots) or `DISPLAY` (X11) must be set.
+The binary is `buckyboi`. `buckyboi --help` prints usage. Feature flags
+keep thin builds working without ONNX or a mic.
 
 ## What you get
 
-1. **Overlay** — fullscreen transparent click-through X11 window, depth-sorted
-   strokes, listening radial icons + settings, hide / wake, Esc quits.
+1. **Overlay** — fullscreen transparent click-through window (native
+   **Wayland** wlr-layer-shell on Hyprland / Omarchy, or **X11**
+   Shape/XFixes), depth-sorted strokes, listening radial icons + settings,
+   hide / wake, Esc quits.
 2. **Gaze** — webcam face/iris proxy → screen look-target; lazy avoid;
    dwell → listen. Not a calibrated eye tracker. Face-ID boxes will
    replace the skin blob when you enable `--features face` and drop in
@@ -43,7 +46,9 @@ for the stack, [SPEC.md](SPEC.md) for icosahedron physics.
    (people, enroll face / voice / gestures, delete).
 5. After a random **5–15 s** of Listening it **hides**. The timer pauses
    while Settings is open.
-6. While hidden, the first **mouse movement or key press** brings it back.
+6. While hidden, the first **mouse movement or key press** brings it back
+   (X11). On Wayland / Hyprland: mouse via compositor IPC, or `SUPER+B`
+   / `buckyboi --wake`.
 
 An **auth chip** above the body shows the matched name or `UNKNOWN`.
 
@@ -114,18 +119,43 @@ Open Listening → Settings → **ID**:
 Re-enroll replaces that modality for the selected person. Gate on the
 **UX** tab: `OFF` → `FACE` → `VOICE` → `ANY` → `ALL`.
 
-## Run (X11)
+## Run (Omarchy / Hyprland / Wayland)
 
 Needs Rust **1.88+** (`rust-toolchain.toml` pins 1.88 — `v4l` / `image`
-need it), an X11 display with **Shape** and **XFixes**, and a 32-bit
-ARGB visual. Webcam support needs a V4L2 device and the default `gaze`
-feature (clang builds the V4L bindings once). Microphone needs
-`--features voice` plus a PipeWire / Pulse / ALSA source.
+need it). On **Omarchy** (Arch + Hyprland + Quickshell) and other
+wlroots compositors the binary is a **standalone** overlay — not a
+Quickshell plugin.
 
 ```bash
 cd rust
-cargo test
-cargo run --release
+cargo test          # compiles X11 + Wayland backends
+cargo run --release # WAYLAND_DISPLAY → layer-shell; else X11
+```
+
+Drop in [contrib/omarchy/hyprland.conf](contrib/omarchy/hyprland.conf):
+
+```
+exec-once = buckyboi
+bind = SUPER, B, exec, buckyboi --wake
+bind = SUPER, Escape, exec, buckyboi --quit
+```
+
+`buckyboi --wake` / `--quit` talk to `$XDG_RUNTIME_DIR/buckyboi.sock`.
+SIGUSR1 also wakes. See [contrib/omarchy/README.md](contrib/omarchy/README.md).
+
+Override: `BUCKYBOI_DISPLAY=x11` (or `wayland`). If layer-shell bind
+fails and `DISPLAY` is set, the process falls back to X11.
+
+## Run (X11)
+
+An X11 display with **Shape** and **XFixes**, and a 32-bit ARGB visual.
+Webcam support needs a V4L2 device and the default `gaze` feature (clang
+builds the V4L bindings once). Microphone needs `--features voice` plus
+a PipeWire / Pulse / ALSA source.
+
+```bash
+cd rust
+BUCKYBOI_DISPLAY=x11 cargo run --release
 ```
 
 ```bash
@@ -155,12 +185,15 @@ BUCKYBOI_FACE_SIM=1 BUCKYBOI_FACE_PROBE=1 \
 | --- | --- | --- | --- |
 | Rust 1.88+ | `rustup` (toolchain file) | same | same |
 | X11 + Shape + XFixes | `libx11-dev libxext-dev libxfixes-dev` | `libX11-devel libXfixes-devel` | `libx11 libxfixes` |
+| Wayland + xkbcommon | `libwayland-dev libxkbcommon-dev` | `wayland-devel libxkbcommon-devel` | `wayland libxkbcommon` |
 | clang (V4L bindgen) | `clang libclang-dev` | `clang` | `clang` |
 | Camera | user in `video`, `/dev/video0` | same | same |
 | Mic | PipeWire / Pulse; user in `audio` | same | same |
 
-Wayland-only sessions: start an XWayland desktop or the process exits.
-There is no portable global-input wake on native Wayland.
+Wayland-only sessions (Hyprland, Sway, labwc, …): native layer-shell
+overlay. GNOME / KWin without `zwlr_layer_shell_v1` fall back to X11
+when `DISPLAY` is set, otherwise exit. There is no portable global-input
+wake on native Wayland — Omarchy uses Hyprland IPC + a hotkey (below).
 
 ## Camera / mic fallbacks
 
@@ -179,11 +212,17 @@ screen.
 
 ## Click-through
 
-On X11 the overlay is 32-bit ARGB, override-redirect, stacked `Above`,
+**X11:** 32-bit ARGB, override-redirect, stacked `Above`,
 `_NET_WM_WINDOW_TYPE_DOCK`, Shape + XFixes input *and* bounding = buddy
 disk + icons + panel. Empty region + `UnmapWindow` while hidden. No
 pointer/keyboard grab; wake uses `XQueryPointer` + `XQueryKeymap`.
 Never `SetInputFocus`.
+
+**Wayland:** `zwlr_layer_shell_v1` **overlay** layer, anchored to all
+edges, `exclusive_zone = 0`. `wl_surface.set_input_region` is empty
+except the same buddy / icon / panel disks. Hidden commits a transparent
+buffer with an empty region (no grab, no focus steal). Keyboard
+interactivity is **OnDemand** so Esc works after you click the buddy.
 
 ## X11 vs Wayland
 
@@ -191,7 +230,11 @@ Never `SetInputFocus`.
 | --- | --- | --- | --- | --- |
 | **X11** | Fullscreen ARGB + Shape | Yes | V4L2 if present | Root pointer + keymap |
 | **XWayland** | Same if `DISPLAY` is set | Usually | Same | X11 side |
-| **Native Wayland** | Not implemented | — | — | No portable protocol |
+| **Native Wayland** (Hyprland / Omarchy / other wlroots) | wlr-layer-shell overlay | `set_input_region` disks | Same | Hyprland `cursorpos` IPC + `buckyboi --wake` / SUPER+B. **Not** “any key anywhere”. |
+| **Wayland without layer-shell** | Falls back to X11 if `DISPLAY` is set | — | — | — |
+
+Multi-output: the layer is created with `output = None` (compositor
+default / focused head). Extra monitors are a follow-up.
 
 ## Tests
 
@@ -218,6 +261,8 @@ ARCHITECTURE.md    crate map + identity stack
 ROADMAP.md         phases and honest leftovers
 UX.md              overlay + auth + calibration flows
 SPEC.md            shared icosahedron physics
+contrib/omarchy/   Hyprland binds + Omarchy notes
+contrib/hyprland/  same snippet for generic Hyprland
 scripts/           model download
 rust/              product crate — lib + bin buckyboi
 python/            historical pygame window

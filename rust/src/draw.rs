@@ -675,6 +675,108 @@ pub fn paint_listening_chrome(
     }
 }
 
+/// Paint the buddy (and listening chrome) into a software ARGB buffer.
+/// `off_x`/`off_y` are the buffer origin in screen space (dirty-rect crop).
+pub fn paint_overlay(
+    buf: &mut [u8],
+    w: u16,
+    h: u16,
+    state: &State,
+    listening: bool,
+    pulse: f32,
+    dwell: f32,
+    menu: &RadialMenu,
+    settings: &Settings,
+    hud: &IdentityHud,
+    mx: f32,
+    my: f32,
+    now_ms: u64,
+    screen_w: f32,
+    screen_h: f32,
+    off_x: f32,
+    off_y: f32,
+) {
+    use crate::sim::HIT_RADIUS;
+    paint_wireframe(buf, w, h, state, off_x, off_y, listening, settings.stroke);
+    if !listening && dwell > 0.04 {
+        let rad = HIT_RADIUS * (0.62 + 0.28 * dwell);
+        let alpha = (36.0 + 90.0 * dwell) as u8;
+        const N: i32 = 64;
+        for i in 0..N {
+            let t0 = i as f32 * (std::f32::consts::TAU / N as f32);
+            let t1 = (i + 1) as f32 * (std::f32::consts::TAU / N as f32);
+            stroke(
+                buf,
+                w,
+                h,
+                state.cx - off_x + rad * t0.cos(),
+                state.cy - off_y + rad * t0.sin(),
+                state.cx - off_x + rad * t1.cos(),
+                state.cy - off_y + rad * t1.sin(),
+                1.6,
+                0xC8,
+                0xD0,
+                0xDC,
+                alpha,
+            );
+        }
+    }
+    if listening {
+        let rad = HIT_RADIUS * (0.72 + 0.10 * pulse);
+        let alpha = (50.0 + 90.0 * pulse) as u8;
+        const N: i32 = 64;
+        for i in 0..N {
+            let t0 = i as f32 * (std::f32::consts::TAU / N as f32);
+            let t1 = (i + 1) as f32 * (std::f32::consts::TAU / N as f32);
+            stroke(
+                buf,
+                w,
+                h,
+                state.cx - off_x + rad * t0.cos(),
+                state.cy - off_y + rad * t0.sin(),
+                state.cx - off_x + rad * t1.cos(),
+                state.cy - off_y + rad * t1.sin(),
+                1.8,
+                0x7E,
+                0xE8,
+                0xFF,
+                alpha,
+            );
+        }
+        paint_listening_chrome(
+            buf,
+            w,
+            h,
+            state.cx,
+            state.cy,
+            menu,
+            settings,
+            hud,
+            mx,
+            my,
+            now_ms,
+            screen_w,
+            screen_h,
+            off_x,
+            off_y,
+        );
+    }
+    let known = hud.auth_label != "UNKNOWN" && !hud.auth_label.is_empty();
+    if !hud.auth_label.is_empty() {
+        paint_auth_chip(
+            buf,
+            w,
+            h,
+            state.cx,
+            state.cy,
+            &hud.auth_label,
+            known,
+            off_x,
+            off_y,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,5 +799,37 @@ mod tests {
         let i = (16 * 32 + 16) * 4;
         // Near-white core should win at the crossing.
         assert!(buf[i + 2] > 120, "r={}", buf[i + 2]);
+    }
+
+    #[test]
+    fn paint_overlay_writes_buddy_pixels() {
+        let s = crate::sim::initial_on(400.0, 300.0);
+        let menu = crate::radial::RadialMenu::new();
+        let settings = crate::radial::Settings::default();
+        let hud = crate::radial::IdentityHud {
+            auth_label: "ADA".into(),
+            ..Default::default()
+        };
+        let mut buf = vec![0u8; 200 * 200 * 4];
+        paint_overlay(
+            &mut buf,
+            200,
+            200,
+            &s,
+            false,
+            0.0,
+            0.0,
+            &menu,
+            &settings,
+            &hud,
+            0.0,
+            0.0,
+            0,
+            400.0,
+            300.0,
+            s.cx - 100.0,
+            s.cy - 100.0,
+        );
+        assert!(buf.iter().any(|b| *b != 0), "overlay should paint strokes");
     }
 }

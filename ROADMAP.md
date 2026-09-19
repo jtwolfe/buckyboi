@@ -35,17 +35,27 @@ calendar estimates.
 - Gate: off / face / voice / any / all; gestures may need prior face.
 - Docs: README, UX, ARCHITECTURE, model download script.
 
+## F — Wayland-native overlay (this tree)
+
+- `wlr-layer-shell` overlay + `set_input_region` click-through on Hyprland / Omarchy / other wlroots.
+- X11 path kept (feature-detect + `BUCKYBOI_DISPLAY`).
+- Hidden wake: Hyprland `cursorpos` IPC, `$XDG_RUNTIME_DIR/buckyboi.sock`, SIGUSR1, `SUPER+B`.
+
 ## Next (not blocking)
 
 - Face-aware gaze: drive `face_to_screen` from SCRFD boxes + 5-point align instead of the skin blob.
 - Landmark-aligned ArcFace (similarity transform to the 112×112 template).
 - First-run wizard that opens before the first listen when gate ≠ off and nobody is enrolled.
-- Wayland layer-shell experiment (no global wake — document the hole).
+- Multi-output follow (one layer per head, or follow the focused output).
+- Fractional-scale / `wp_viewporter` so HiDPI is sharp (v1 uses logical pixels).
 - Packaged `.deb` / Flathub with a models extra.
 
 ## Honest limits
 
-- Overlay is an X11 prototype. Wayland-native is not implemented.
+- Wayland overlay is **wlroots / Hyprland layer-shell**. GNOME Mutter
+  without that protocol is X11-fallback or refuse.
+- Hidden wake on Wayland is Hyprland IPC + a hotkey / socket — not
+  “any key anywhere”.
 - Face / voice prints here are **not** a commercial biometric. Thresholds fail closed; expect false rejects in bad light / noise.
 - Cloud agent VMs usually have **no camera and no mic**. Use the `*_SIM` env vars and unit tests.
 - `ort` / `sherpa-onnx` add compile time and download native libs — keep them off default features.

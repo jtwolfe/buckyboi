@@ -18,9 +18,12 @@ VisibleIdle ──gaze-follow 5–15s──► Listening ──timeout──► 
 | --- | --- | --- |
 | `VisibleIdle` | Rotating wireframe. Soft-avoids **gaze** (or the mouse). Dwell ring. Auth chip (`ADA` / `UNKNOWN`). | Click-through except the buddy. Tap starts Listening *if the gate allows*. Drag relocates. |
 | `Listening` | Brighter wire + pulse. Radial icons. Settings: **UX** and **ID** tabs. Enrollment panel when a wizard is running. | Icons + panel in the hit region. Timer **pauses** while Settings is open. |
-| `Hidden` | Overlay unmapped, empty input shape | First root-pointer move (≥ 1 px) or keymap change remaps `VisibleIdle`. |
+| `Hidden` | Overlay unmapped (X11) or transparent + empty `set_input_region` (Wayland) | **X11:** first root-pointer move (≥ 1 px) or keymap change. **Wayland / Hyprland:** cursorpos IPC, `buckyboi --wake`, SIGUSR1, or `SUPER+B`. |
 
-Esc (X keymap poll, no grab) quits from any phase.
+Esc quits from any phase on X11 (keymap poll, no grab). On Wayland, Esc
+works after the layer has OnDemand keyboard focus (click the buddy);
+`SUPER+Escape` → `buckyboi --quit` always works. See
+[contrib/omarchy/](contrib/omarchy/).
 
 ## Gaze (prototype)
 
@@ -145,6 +148,12 @@ Darker halo + brighter core. Edges sorted far→near (`draw::edges_far_to_near`)
 
 ## Click-through / wake
 
-Fullscreen 32-bit ARGB. Shape + XFixes set both `Input` and `Bounding`.
-Never `SetInputFocus`, never grab. Hidden: unmap + empty shape; poll
-`XQueryPointer` and `XQueryKeymap`. No Wayland-portable equivalent.
+**X11:** fullscreen 32-bit ARGB. Shape + XFixes set both `Input` and
+`Bounding`. Never `SetInputFocus`, never grab. Hidden: unmap + empty
+shape; poll `XQueryPointer` and `XQueryKeymap`.
+
+**Wayland:** wlr-layer-shell overlay, empty `wl_surface` input region
+except buddy / icons / panel. Never grab. Hidden: transparent commit +
+empty region. Wake is compositor-specific (Hyprland `cursorpos` +
+control socket). True “any key anywhere” is not possible as a plain
+Wayland client.
