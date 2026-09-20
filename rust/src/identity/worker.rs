@@ -1,9 +1,10 @@
-//! Vision worker: ONNX off the present thread. FaceSnap + HandSnap only (PR1).
+//! Vision worker: ONNX / sherpa off the present thread. FaceSnap + HandSnap + VoiceSnap.
 
 use crate::identity::embed::Embedding;
 use crate::identity::enroll::EnrollKind;
 use crate::identity::face::FaceQuality;
 use crate::identity::hands::HandStatus;
+use crate::identity::voice::VoiceQuality;
 #[cfg(any(test, feature = "face", feature = "hands", feature = "voice"))]
 use crate::identity::VISION_INFER_MS;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -31,8 +32,16 @@ pub struct HandSnap {
     pub status: HandStatus,
 }
 
+#[derive(Clone, Debug)]
+pub struct VoiceSnap {
+    pub t_ms: u64,
+    pub quality: VoiceQuality,
+    pub embedding: Option<Embedding>,
+}
+
 static FACE_SLOT: OnceLock<Mutex<Option<FaceSnap>>> = OnceLock::new();
 static HAND_SLOT: OnceLock<Mutex<Option<HandSnap>>> = OnceLock::new();
+static VOICE_SLOT: OnceLock<Mutex<Option<VoiceSnap>>> = OnceLock::new();
 static GALLERY_KINDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static HANDLE: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
@@ -44,7 +53,7 @@ static VISION_WORKER: AtomicBool = AtomicBool::new(false);
 static DEAD_LOGGED: AtomicBool = AtomicBool::new(false);
 #[cfg_attr(not(feature = "face"), allow(dead_code))]
 static ENROLLING_FACE: AtomicBool = AtomicBool::new(false);
-#[allow(dead_code)] // PR2 voice cadence
+#[cfg_attr(not(feature = "voice"), allow(dead_code))]
 static ENROLLING_VOICE: AtomicBool = AtomicBool::new(false);
 static SCREEN_W: AtomicU32 = AtomicU32::new(0);
 static SCREEN_H: AtomicU32 = AtomicU32::new(0);
@@ -64,6 +73,10 @@ fn face_slot() -> &'static Mutex<Option<FaceSnap>> {
 
 fn hand_slot() -> &'static Mutex<Option<HandSnap>> {
     HAND_SLOT.get_or_init(|| Mutex::new(None))
+}
+
+fn voice_slot() -> &'static Mutex<Option<VoiceSnap>> {
+    VOICE_SLOT.get_or_init(|| Mutex::new(None))
 }
 
 fn kinds_slot() -> &'static Mutex<Vec<String>> {
@@ -88,6 +101,13 @@ fn publish_hand(snap: HandSnap) {
     }
 }
 
+#[cfg_attr(not(feature = "voice"), allow(dead_code))]
+fn publish_voice(snap: VoiceSnap) {
+    if let Ok(mut g) = voice_slot().lock() {
+        *g = Some(snap);
+    }
+}
+
 /// Stamp at slice start (miss or hit). Never rewrite after infer.
 #[cfg_attr(
     not(any(feature = "face", feature = "hands", feature = "voice")),
@@ -108,6 +128,10 @@ pub fn latest_face() -> Option<FaceSnap> {
 
 pub fn latest_hand() -> Option<HandSnap> {
     hand_slot().lock().ok().and_then(|g| g.clone())
+}
+
+pub fn latest_voice() -> Option<VoiceSnap> {
+    voice_slot().lock().ok().and_then(|g| g.clone())
 }
 
 /// Fresh SCRFD/skin look within the present consume window. No GazeSnap in PR1.
@@ -254,11 +278,18 @@ fn hand_status(frame: Option<&crate::camera::CamFrame>) -> HandStatus {
     crate::identity::hands::extract_status(&frame.rgb, frame.w, frame.h)
 }
 
+#[cfg(feature = "voice")]
+fn take_voice_samples() -> Vec<f32> {
+    crate::identity::voice::worker_samples()
+}
+
 #[cfg(any(feature = "face", feature = "hands", feature = "voice"))]
 fn vision_loop() {
     let mut last_vis_ms = 0u64;
     #[cfg(feature = "face")]
     let mut last_rec_ms = 0u64;
+    #[cfg(feature = "voice")]
+    let mut last_voice_ms = 0u64;
     let mut last_pub_ms = 0u64;
     let mut last_hb_log = 0u64;
     #[cfg(feature = "hands")]
@@ -321,6 +352,29 @@ fn vision_loop() {
                     _ => nohand_since = None,
                 }
                 publish_hand(HandSnap { t_ms: now, status });
+            }
+        }
+
+        // Voice cadence is separate; skip if this vision slice already spent ≥ 40 ms.
+        #[cfg(feature = "voice")]
+        {
+            let period = if ENROLLING_VOICE.load(Ordering::Relaxed) {
+                1_600
+            } else {
+                2_400
+            };
+            if now.saturating_sub(last_voice_ms) >= period && t0.elapsed().as_millis() < 40 {
+                last_voice_ms = now;
+                let samples = take_voice_samples();
+                let (quality, embedding) = crate::identity::voice::extract_embedding(
+                    &samples,
+                    crate::identity::voice::VOICE_SAMPLE_RATE,
+                );
+                publish_voice(VoiceSnap {
+                    t_ms: now,
+                    quality,
+                    embedding,
+                });
             }
         }
 
@@ -387,6 +441,28 @@ mod tests {
         });
         let got = latest_hand().expect("published");
         assert!(matches!(got.status, HandStatus::NoModel));
+    }
+
+    #[test]
+    fn latest_voice_clones_out_of_lock() {
+        let snap = VoiceSnap {
+            t_ms: 42,
+            quality: VoiceQuality::assess(&[], crate::identity::voice::VOICE_SAMPLE_RATE),
+            embedding: None,
+        };
+        publish_voice(snap);
+        let got = latest_voice().expect("published");
+        assert_eq!(got.t_ms, 42);
+        assert!(!got.quality.ok);
+        assert!(got.embedding.is_none());
+        publish_voice(VoiceSnap {
+            t_ms: 43,
+            quality: VoiceQuality::assess(&[], crate::identity::voice::VOICE_SAMPLE_RATE),
+            embedding: Some(Embedding::new("logmel", vec![1.0; 4])),
+        });
+        let got = latest_voice().expect("published");
+        assert_eq!(got.t_ms, 43);
+        assert!(got.embedding.is_some());
     }
 
     #[test]

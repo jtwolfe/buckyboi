@@ -11,13 +11,21 @@
 
 use crate::identity::embed::Embedding;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "voice")]
+use std::sync::OnceLock;
 
 pub const VOICE_ENROLL_NEED: usize = 3;
 pub const VOICE_MIN_MS: u32 = 1_200;
+/// Wall-clock enroll deadline; checked every present tick, not the 1.6 s cadence.
+pub const VOICE_ENROLL_TIMEOUT_MS: u64 = 12_000;
+/// Empty / quiet `push_voice` cap. Timeout OR this, whichever first.
+pub const VOICE_ENROLL_REJECT_CAP: u32 = 8;
 pub const VOICE_KIND_LOGMEL: &str = "logmel";
 pub const VOICE_KIND_SHERPA: &str = "sherpa";
 pub const VOICE_SAMPLE_RATE: u32 = 16_000;
 pub const MEL_BANDS: usize = 40;
+/// Window the worker copies from the ring before dropping the cpal lock.
+pub const VOICE_TAKE_MS: u32 = 1_600;
 /// Cosine for sherpa-onnx speaker manager search (CampPlus / ERes2Net EN).
 pub const VOICE_THRESHOLD_SHERPA: f32 = 0.60;
 pub const VOICE_THRESHOLD_LOGMEL: f32 = 0.62;
@@ -27,6 +35,7 @@ pub enum VoiceReject {
     None,
     TooShort,
     TooQuiet,
+    NoMic,
 }
 
 impl VoiceReject {
@@ -35,6 +44,7 @@ impl VoiceReject {
             VoiceReject::None => "",
             VoiceReject::TooShort => "TOO SHORT",
             VoiceReject::TooQuiet => "TOO QUIET",
+            VoiceReject::NoMic => "NO MIC",
         }
     }
 }
@@ -350,24 +360,100 @@ pub mod capture {
 
         pub fn take_last_ms(&self, ms: u32) -> Vec<f32> {
             let n = (self.rate as u64 * ms as u64 / 1000) as usize;
-            let Ok(g) = self.inner.lock() else {
-                return Vec::new();
+            // Copy under the ring lock, then drop it before sherpa/log-mel.
+            let copy = {
+                let Ok(g) = self.inner.lock() else {
+                    return Vec::new();
+                };
+                if g.len() <= n {
+                    g.clone()
+                } else {
+                    g[g.len() - n..].to_vec()
+                }
             };
-            if g.len() <= n {
-                g.clone()
-            } else {
-                g[g.len() - n..].to_vec()
-            }
+            copy
         }
     }
+}
+
+#[cfg(feature = "voice")]
+static MIC: OnceLock<Option<capture::MicBuffer>> = OnceLock::new();
+
+/// Start cpal once after backend open. Never retry (no hotplug). SIM skips cpal.
+pub fn start_mic() {
+    #[cfg(feature = "voice")]
+    {
+        let _ = MIC.get_or_init(|| {
+            if crate::identity::env_flag("BUCKYBOI_VOICE_SIM") {
+                return None;
+            }
+            match capture::MicBuffer::start() {
+                Some(buf) => {
+                    eprintln!("buckyboi: mic capture started");
+                    Some(buf)
+                }
+                None => {
+                    eprintln!("buckyboi: no input device");
+                    None
+                }
+            }
+        });
+    }
+}
+
+#[cfg(feature = "voice")]
+pub fn mic() -> Option<&'static capture::MicBuffer> {
+    MIC.get().and_then(|o| o.as_ref())
+}
+
+/// SIM counts as available (tone, never cpal). No device and not SIM → false.
+pub fn input_available() -> bool {
+    if crate::identity::env_flag("BUCKYBOI_VOICE_SIM") {
+        return true;
+    }
+    #[cfg(feature = "voice")]
+    {
+        return mic().is_some();
+    }
+    #[cfg(not(feature = "voice"))]
+    false
+}
+
+/// 1.6 s 196 Hz tone for `BUCKYBOI_VOICE_SIM` (worker embed, never cpal).
+#[cfg(feature = "voice")]
+pub fn sim_tone() -> Vec<f32> {
+    let n = VOICE_SAMPLE_RATE * VOICE_TAKE_MS / 1000;
+    (0..n)
+        .map(|i| {
+            0.22 * (2.0 * std::f32::consts::PI * 196.0 * i as f32 / VOICE_SAMPLE_RATE as f32).sin()
+        })
+        .collect()
+}
+
+/// Ring copy (or SIM tone) for the vision worker. Present must not embed.
+#[cfg(feature = "voice")]
+pub fn worker_samples() -> Vec<f32> {
+    if crate::identity::env_flag("BUCKYBOI_VOICE_SIM") {
+        return sim_tone();
+    }
+    #[cfg(feature = "voice")]
+    if let Some(m) = mic() {
+        return m.take_last_ms(VOICE_TAKE_MS);
+    }
+    Vec::new()
 }
 
 #[cfg(any(feature = "voice", feature = "voice-sherpa"))]
 mod sherpa {
     use super::*;
     use crate::identity::models_dir;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
 
-    pub fn embed(samples: &[f32], sample_rate: u32) -> Option<Embedding> {
+    static EXTRACTOR: Mutex<Option<sherpa_onnx::SpeakerEmbeddingExtractor>> = Mutex::new(None);
+    static TRIED: AtomicBool = AtomicBool::new(false);
+
+    fn create_extractor() -> Option<sherpa_onnx::SpeakerEmbeddingExtractor> {
         let dir = models_dir()?;
         let model = pick_speaker_model(&dir)?;
         let model = model.to_string_lossy().into_owned();
@@ -377,7 +463,23 @@ mod sherpa {
             debug: false,
             provider: Some("cpu".into()),
         };
-        let extractor = sherpa_onnx::SpeakerEmbeddingExtractor::create(&cfg)?;
+        sherpa_onnx::SpeakerEmbeddingExtractor::create(&cfg)
+    }
+
+    fn extractor(
+    ) -> Option<std::sync::MutexGuard<'static, Option<sherpa_onnx::SpeakerEmbeddingExtractor>>>
+    {
+        let mut g = EXTRACTOR.lock().ok()?;
+        // Process-lifetime: first call creates (or records miss); never create() again.
+        if !TRIED.swap(true, Ordering::SeqCst) {
+            *g = create_extractor();
+        }
+        Some(g)
+    }
+
+    pub fn embed(samples: &[f32], sample_rate: u32) -> Option<Embedding> {
+        let g = extractor()?;
+        let extractor = g.as_ref()?;
         let stream = extractor.create_stream()?;
         stream.accept_waveform(sample_rate as i32, samples);
         stream.input_finished();
@@ -477,5 +579,48 @@ mod tests {
         assert_eq!(short.reject.hint(), "TOO SHORT");
         let quiet = VoiceQuality::assess(&vec![0.0001; 20_000], 16_000);
         assert_eq!(quiet.reject, VoiceReject::TooQuiet);
+        assert_eq!(VoiceReject::NoMic.hint(), "NO MIC");
+        let empty = VoiceQuality::assess(&[], VOICE_SAMPLE_RATE);
+        assert!(!empty.ok);
+        assert_eq!(empty.reject, VoiceReject::TooShort);
+    }
+
+    /// First `create` wins; a later call is a no-op even if the first returned None.
+    fn init_once<T>(slot: &mut Option<T>, tried: &mut bool, create: impl FnOnce() -> Option<T>) {
+        if *tried {
+            return;
+        }
+        *tried = true;
+        *slot = create();
+    }
+
+    #[test]
+    fn cached_extractor_second_call_skips_create() {
+        let mut slot: Option<i32> = None;
+        let mut tried = false;
+        let mut creates = 0;
+        init_once(&mut slot, &mut tried, || {
+            creates += 1;
+            None
+        });
+        init_once(&mut slot, &mut tried, || {
+            creates += 1;
+            Some(9)
+        });
+        assert_eq!(creates, 1, "already-tried must not call create");
+        assert!(slot.is_none());
+        let mut filled: Option<i32> = None;
+        let mut tried2 = false;
+        creates = 0;
+        init_once(&mut filled, &mut tried2, || {
+            creates += 1;
+            Some(7)
+        });
+        init_once(&mut filled, &mut tried2, || {
+            creates += 1;
+            Some(8)
+        });
+        assert_eq!(creates, 1);
+        assert_eq!(filled, Some(7));
     }
 }
