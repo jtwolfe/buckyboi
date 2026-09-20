@@ -5,7 +5,7 @@ use crate::identity::embed::{
     best_match, best_match_if, Embedding, MatchHit, DEFAULT_FACE_THRESHOLD,
     DEFAULT_GESTURE_THRESHOLD, DEFAULT_VOICE_THRESHOLD,
 };
-use crate::identity::face::{FACE_KIND_ARCFACE, FACE_KIND_ARCFACE_R50};
+use crate::identity::face::is_r50_kind;
 use crate::identity::gate::GateMode;
 use crate::identity::hands::{
     gesture_centroid, GestureAction, GestureClass, GestureMap, DEFAULT_GESTURE_MAP,
@@ -403,11 +403,7 @@ pub fn identity_ini_lines(s: &IdentitySettings) -> String {
 }
 
 pub fn face_kinds_compatible(a: &str, b: &str) -> bool {
-    a == b || (is_r50_family(a) && is_r50_family(b))
-}
-
-fn is_r50_family(k: &str) -> bool {
-    k == FACE_KIND_ARCFACE || k == FACE_KIND_ARCFACE_R50
+    a == b || (is_r50_kind(a) && is_r50_kind(b))
 }
 
 #[cfg(test)]
