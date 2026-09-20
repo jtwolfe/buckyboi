@@ -1,8 +1,6 @@
 //! Listening-mode radial icons + attached settings panel (pure logic).
 
-use crate::identity::{
-    identity_ini_lines, parse_identity_ini, GateMode, IdentitySettings,
-};
+use crate::identity::{identity_ini_lines, parse_identity_ini, GateMode, IdentitySettings};
 use std::fs;
 use std::path::PathBuf;
 
@@ -337,13 +335,7 @@ fn slider_value(mx: f32, track: (f32, f32, f32, f32), min: f32, max: f32) -> f32
     min + t * (max - min)
 }
 
-pub fn hit_panel(
-    mx: f32,
-    my: f32,
-    px: f32,
-    py: f32,
-    settings: &Settings,
-) -> RadialAction {
+pub fn hit_panel(mx: f32, my: f32, px: f32, py: f32, settings: &Settings) -> RadialAction {
     hit_panel_ex(mx, my, px, py, settings, 0, false, None)
 }
 
@@ -450,16 +442,37 @@ pub fn hit_panel_ex(
         return RadialAction::CycleGate;
     }
     let listen = slider_track(px, py, 0);
-    if in_rect(mx, my, listen.0 - 4.0, listen.1 - 6.0, listen.2 + 8.0, listen.3 + 12.0) {
+    if in_rect(
+        mx,
+        my,
+        listen.0 - 4.0,
+        listen.1 - 6.0,
+        listen.2 + 8.0,
+        listen.3 + 12.0,
+    ) {
         let v = slider_value(mx, listen, 2_000.0, 15_000.0) as u32;
         return RadialAction::SetListenMs(v);
     }
     let gaze = slider_track(px, py, 1);
-    if in_rect(mx, my, gaze.0 - 4.0, gaze.1 - 6.0, gaze.2 + 8.0, gaze.3 + 12.0) {
+    if in_rect(
+        mx,
+        my,
+        gaze.0 - 4.0,
+        gaze.1 - 6.0,
+        gaze.2 + 8.0,
+        gaze.3 + 12.0,
+    ) {
         return RadialAction::SetGazeMs(slider_value(mx, gaze, 2_000.0, 15_000.0) as u32);
     }
     let stroke = slider_track(px, py, 2);
-    if in_rect(mx, my, stroke.0 - 4.0, stroke.1 - 6.0, stroke.2 + 8.0, stroke.3 + 12.0) {
+    if in_rect(
+        mx,
+        my,
+        stroke.0 - 4.0,
+        stroke.1 - 6.0,
+        stroke.2 + 8.0,
+        stroke.3 + 12.0,
+    ) {
         return RadialAction::SetStroke(slider_value(mx, stroke, 0.8, 3.0));
     }
     if in_rect(mx, my, px, py, PANEL_W, PANEL_H) {
@@ -468,11 +481,20 @@ pub fn hit_panel_ex(
     RadialAction::None
 }
 
-pub fn apply_action(menu: &mut RadialMenu, settings: &mut Settings, action: RadialAction, now_ms: u64) {
+pub fn apply_action(
+    menu: &mut RadialMenu,
+    settings: &mut Settings,
+    action: RadialAction,
+    now_ms: u64,
+) {
     match action {
         RadialAction::ToggleSettings => {
             menu.settings_open = !menu.settings_open;
-            menu.freeze_ms = if menu.settings_open { Some(now_ms) } else { None };
+            menu.freeze_ms = if menu.settings_open {
+                Some(now_ms)
+            } else {
+                None
+            };
             menu.flash(IconId::Settings, now_ms);
         }
         RadialAction::CloseSettings => {
@@ -588,16 +610,7 @@ pub fn click_listening_ex(
     if menu.panel_open() {
         if let Some((_, sx, sy)) = centers.iter().find(|(id, _, _)| *id == IconId::Settings) {
             let (px, py, _, _) = panel_rect(*sx, *sy, screen_w, screen_h);
-            let act = hit_panel_ex(
-                mx,
-                my,
-                px,
-                py,
-                settings,
-                people_n,
-                enroll_active,
-                wizard,
-            );
+            let act = hit_panel_ex(mx, my, px, py, settings, people_n, enroll_active, wizard);
             if act != RadialAction::None {
                 apply_action(menu, settings, act, now_ms);
                 return act;
@@ -644,7 +657,10 @@ pub fn overlay_bounds(
             y1 = y1.max(y + ICON_RADIUS + 3.0);
         }
         if menu.panel_open() {
-            if let Some((_, sx, sy)) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Settings)
+            if let Some((_, sx, sy)) = centers
+                .iter()
+                .copied()
+                .find(|(id, _, _)| *id == IconId::Settings)
             {
                 let (px, py, pw, ph) = panel_rect(sx, sy, screen_w, screen_h);
                 x0 = x0.min(px);
@@ -679,7 +695,10 @@ pub fn hit_rects(
         }
         if menu.panel_open() {
             let centers = icon_centers(cx, cy, menu.layout_ms(now_ms), true);
-            if let Some((_, sx, sy)) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Settings)
+            if let Some((_, sx, sy)) = centers
+                .iter()
+                .copied()
+                .find(|(id, _, _)| *id == IconId::Settings)
             {
                 let (px, py, pw, ph) = panel_rect(sx, sy, screen_w, screen_h);
                 r.push((px as i16, py as i16, pw as u16, ph as u16));
@@ -852,7 +871,11 @@ mod tests {
         menu.settings_open = true;
         let mut s = Settings::default();
         let centers = icon_centers(400.0, 400.0, 0, false);
-        let (_, dx, dy) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Dismiss).unwrap();
+        let (_, dx, dy) = centers
+            .iter()
+            .copied()
+            .find(|(id, _, _)| *id == IconId::Dismiss)
+            .unwrap();
         let act = click_listening(&mut menu, &mut s, dx, dy, 400.0, 400.0, 1, 1920.0, 1200.0);
         assert_eq!(act, RadialAction::Dismiss);
         assert!(!menu.settings_open);
@@ -873,10 +896,7 @@ mod tests {
         apply_action(&mut menu, &mut s, act, 0);
         assert!(!s.camera);
         let (cx, cy) = close_button(px, py);
-        assert_eq!(
-            hit_panel(cx, cy, px, py, &s),
-            RadialAction::CloseSettings
-        );
+        assert_eq!(hit_panel(cx, cy, px, py, &s), RadialAction::CloseSettings);
     }
 
     #[test]

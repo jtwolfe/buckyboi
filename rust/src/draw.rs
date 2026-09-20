@@ -325,15 +325,106 @@ pub fn paint_icon(
             fill_disk(buf, w, h, x, y, 1.4, 0x18, 0x24, 0x30, 250);
         }
         IconId::Dismiss => {
-            stroke(buf, w, h, x - 5.0, y - 5.0, x + 5.0, y + 5.0, 2.0, ir, ig, ib, 250);
-            stroke(buf, w, h, x + 5.0, y - 5.0, x - 5.0, y + 5.0, 2.0, ir, ig, ib, 250);
+            stroke(
+                buf,
+                w,
+                h,
+                x - 5.0,
+                y - 5.0,
+                x + 5.0,
+                y + 5.0,
+                2.0,
+                ir,
+                ig,
+                ib,
+                250,
+            );
+            stroke(
+                buf,
+                w,
+                h,
+                x + 5.0,
+                y - 5.0,
+                x - 5.0,
+                y + 5.0,
+                2.0,
+                ir,
+                ig,
+                ib,
+                250,
+            );
         }
         IconId::Mute => {
-            stroke(buf, w, h, x - 5.0, y - 3.0, x - 2.0, y - 3.0, 1.8, ir, ig, ib, 250);
-            stroke(buf, w, h, x - 2.0, y - 5.0, x + 3.0, y - 1.0, 1.8, ir, ig, ib, 250);
-            stroke(buf, w, h, x - 2.0, y + 5.0, x + 3.0, y + 1.0, 1.8, ir, ig, ib, 250);
-            stroke(buf, w, h, x - 5.0, y + 3.0, x - 2.0, y + 3.0, 1.8, ir, ig, ib, 250);
-            stroke(buf, w, h, x - 4.0, y + 6.0, x + 5.0, y - 6.0, 1.6, 0x7E, 0xE8, 0xFF, 240);
+            stroke(
+                buf,
+                w,
+                h,
+                x - 5.0,
+                y - 3.0,
+                x - 2.0,
+                y - 3.0,
+                1.8,
+                ir,
+                ig,
+                ib,
+                250,
+            );
+            stroke(
+                buf,
+                w,
+                h,
+                x - 2.0,
+                y - 5.0,
+                x + 3.0,
+                y - 1.0,
+                1.8,
+                ir,
+                ig,
+                ib,
+                250,
+            );
+            stroke(
+                buf,
+                w,
+                h,
+                x - 2.0,
+                y + 5.0,
+                x + 3.0,
+                y + 1.0,
+                1.8,
+                ir,
+                ig,
+                ib,
+                250,
+            );
+            stroke(
+                buf,
+                w,
+                h,
+                x - 5.0,
+                y + 3.0,
+                x - 2.0,
+                y + 3.0,
+                1.8,
+                ir,
+                ig,
+                ib,
+                250,
+            );
+            stroke(
+                buf,
+                w,
+                h,
+                x - 4.0,
+                y + 6.0,
+                x + 5.0,
+                y - 6.0,
+                1.6,
+                0x7E,
+                0xE8,
+                0xFF,
+                240,
+            );
         }
         IconId::Info => {
             fill_disk(buf, w, h, x, y - 3.5, 1.3, ir, ig, ib, 250);
@@ -387,7 +478,19 @@ pub fn paint_panel(
     let ph = PANEL_H as i32;
     fill_rect(buf, w, h, x, y, pw, ph, 0x12, 0x18, 0x22, 245);
     fill_rect(buf, w, h, x, y, pw, 3, 0x4A, 0xC0, 0xD8, 220);
-    text(buf, w, h, x + 10, y + 8, "BUCKYBOI", 2, 0xDE, 0xEC, 0xF6, 250);
+    text(
+        buf,
+        w,
+        h,
+        x + 10,
+        y + 8,
+        "BUCKYBOI",
+        2,
+        0xDE,
+        0xEC,
+        0xF6,
+        250,
+    );
     let (cx, cy) = close_button(px, py);
     fill_disk(
         buf,
@@ -433,12 +536,48 @@ pub fn paint_panel(
     if hud.wizard_open {
         let title: String = hud.wizard_title.chars().take(16).collect();
         text(buf, w, h, x + 10, y + 32, &title, 2, 0x7E, 0xE8, 0xFF, 250);
-        text(buf, w, h, x + 10, y + 64, "ENROLL", 2, 0xB0, 0xC0, 0xD0, 240);
+        text(
+            buf,
+            w,
+            h,
+            x + 10,
+            y + 64,
+            "ENROLL",
+            2,
+            0xB0,
+            0xC0,
+            0xD0,
+            240,
+        );
         let body: String = hud.wizard_body.chars().take(16).collect();
         text(buf, w, h, x + 10, y + 92, &body, 2, 0x7E, 0xE8, 0xFF, 250);
-        fill_rect(buf, w, h, x + 10, y + 130, pw - 20, 10, 0x22, 0x2C, 0x36, 240);
+        fill_rect(
+            buf,
+            w,
+            h,
+            x + 10,
+            y + 130,
+            pw - 20,
+            10,
+            0x22,
+            0x2C,
+            0x36,
+            240,
+        );
         let fill_w = ((pw - 20) as f32 * hud.wizard_progress.clamp(0.0, 1.0)) as i32;
-        fill_rect(buf, w, h, x + 10, y + 130, fill_w, 10, 0x4A, 0xC0, 0xD8, 240);
+        fill_rect(
+            buf,
+            w,
+            h,
+            x + 10,
+            y + 130,
+            fill_w,
+            10,
+            0x4A,
+            0xC0,
+            0xD8,
+            240,
+        );
         if !hud.face_chip.is_empty() {
             let chip: String = hud.face_chip.chars().take(18).collect();
             text(buf, w, h, x + 10, y + 150, &chip, 2, 0xC8, 0xD0, 0xDC, 240);
@@ -456,10 +595,28 @@ pub fn paint_panel(
             );
         }
         if hud.wizard_can_skip {
-            paint_btn(buf, w, h, wizard_skip_hit(px, py), off_x, off_y, "SKIP", false);
+            paint_btn(
+                buf,
+                w,
+                h,
+                wizard_skip_hit(px, py),
+                off_x,
+                off_y,
+                "SKIP",
+                false,
+            );
         }
         if hud.wizard_can_add {
-            paint_btn(buf, w, h, wizard_add_hit(px, py), off_x, off_y, "ADD", false);
+            paint_btn(
+                buf,
+                w,
+                h,
+                wizard_add_hit(px, py),
+                off_x,
+                off_y,
+                "ADD",
+                false,
+            );
         }
         let _ = (pw, ph);
         return;
@@ -487,25 +644,94 @@ pub fn paint_panel(
     );
 
     if hud.enroll_active {
-        text(buf, w, h, x + 10, y + 64, "ENROLL", 2, 0xB0, 0xC0, 0xD0, 240);
+        text(
+            buf,
+            w,
+            h,
+            x + 10,
+            y + 64,
+            "ENROLL",
+            2,
+            0xB0,
+            0xC0,
+            0xD0,
+            240,
+        );
         let hint: String = hud.enroll_hint.chars().take(16).collect();
         text(buf, w, h, x + 10, y + 92, &hint, 2, 0x7E, 0xE8, 0xFF, 250);
-        fill_rect(buf, w, h, x + 10, y + 130, pw - 20, 10, 0x22, 0x2C, 0x36, 240);
+        fill_rect(
+            buf,
+            w,
+            h,
+            x + 10,
+            y + 130,
+            pw - 20,
+            10,
+            0x22,
+            0x2C,
+            0x36,
+            240,
+        );
         let fill_w = ((pw - 20) as f32 * hud.enroll_progress.clamp(0.0, 1.0)) as i32;
-        fill_rect(buf, w, h, x + 10, y + 130, fill_w, 10, 0x4A, 0xC0, 0xD8, 240);
+        fill_rect(
+            buf,
+            w,
+            h,
+            x + 10,
+            y + 130,
+            fill_w,
+            10,
+            0x4A,
+            0xC0,
+            0xD8,
+            240,
+        );
         if !hud.face_chip.is_empty() {
             let chip: String = hud.face_chip.chars().take(18).collect();
             text(buf, w, h, x + 10, y + 148, &chip, 2, 0xC8, 0xD0, 0xDC, 240);
         }
-        paint_btn(buf, w, h, cancel_enroll_hit(px, py), off_x, off_y, "CANCEL", false);
+        paint_btn(
+            buf,
+            w,
+            h,
+            cancel_enroll_hit(px, py),
+            off_x,
+            off_y,
+            "CANCEL",
+            false,
+        );
         let _ = (pw, ph);
         return;
     }
 
     if settings.page == SettingsPage::People {
-        text(buf, w, h, x + 10, y + 64, "PEOPLE", 2, 0xB0, 0xC0, 0xD0, 240);
+        text(
+            buf,
+            w,
+            h,
+            x + 10,
+            y + 64,
+            "PEOPLE",
+            2,
+            0xB0,
+            0xC0,
+            0xD0,
+            240,
+        );
         if hud.people.is_empty() {
-            text(buf, w, h, x + 10, y + 92, "NONE YET", 2, 0x8A, 0x9A, 0xA8, 230);
+            text(
+                buf,
+                w,
+                h,
+                x + 10,
+                y + 92,
+                "NONE YET",
+                2,
+                0x8A,
+                0x9A,
+                0xA8,
+                230,
+            );
         }
         for (i, name) in hud.people.iter().take(4).enumerate() {
             let r = person_row_hit(px, py, i);
@@ -557,7 +783,19 @@ pub fn paint_panel(
         settings.camera,
     );
 
-    text(buf, w, h, x + 10, y + 64 + 28, "GATE", 2, 0xB0, 0xC0, 0xD0, 240);
+    text(
+        buf,
+        w,
+        h,
+        x + 10,
+        y + 64 + 28,
+        "GATE",
+        2,
+        0xB0,
+        0xC0,
+        0xD0,
+        240,
+    );
     // gate button sits on the CAM row's right in hit tests; label it beside CAM
     let _ = gate_hit(px, py);
     // Place GATE label on look page under CAM via reused camera row + extra.
@@ -575,21 +813,47 @@ pub fn paint_panel(
         250,
     );
 
-    fn row(
-        buf: &mut [u8],
-        w: u16,
-        h: u16,
-        x: i32,
-        y: i32,
-        label: &str,
-        t: f32,
-        value: &str,
-    ) {
+    fn row(buf: &mut [u8], w: u16, h: u16, x: i32, y: i32, label: &str, t: f32, value: &str) {
         text(buf, w, h, x + 10, y, label, 2, 0xB0, 0xC0, 0xD0, 240);
-        fill_rect(buf, w, h, x + 88, y + 2, (PANEL_W as i32) - 104, 8, 0x22, 0x2C, 0x36, 240);
+        fill_rect(
+            buf,
+            w,
+            h,
+            x + 88,
+            y + 2,
+            (PANEL_W as i32) - 104,
+            8,
+            0x22,
+            0x2C,
+            0x36,
+            240,
+        );
         let knob = 88 + (((PANEL_W as i32) - 104) as f32 * t).round() as i32;
-        fill_rect(buf, w, h, x + 88, y + 2, knob - 88, 8, 0x4A, 0xC0, 0xD8, 230);
-        fill_disk(buf, w, h, (x + knob) as f32, (y + 6) as f32, 5.0, 0x7E, 0xE8, 0xFF, 250);
+        fill_rect(
+            buf,
+            w,
+            h,
+            x + 88,
+            y + 2,
+            knob - 88,
+            8,
+            0x4A,
+            0xC0,
+            0xD8,
+            230,
+        );
+        fill_disk(
+            buf,
+            w,
+            h,
+            (x + knob) as f32,
+            (y + 6) as f32,
+            5.0,
+            0x7E,
+            0xE8,
+            0xFF,
+            250,
+        );
         text(buf, w, h, x + 88, y - 10, value, 1, 0x8A, 0x9A, 0xA8, 220);
     }
 
@@ -708,7 +972,11 @@ pub fn paint_listening_chrome(
         );
     }
     if menu.panel_open() {
-        if let Some((_, sx, sy)) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Settings) {
+        if let Some((_, sx, sy)) = centers
+            .iter()
+            .copied()
+            .find(|(id, _, _)| *id == IconId::Settings)
+        {
             let (px, py, _, _) = panel_rect(sx, sy, screen_w, screen_h);
             paint_panel(buf, w, h, px, py, settings, hud, off_x, off_y);
         }
@@ -784,21 +1052,8 @@ pub fn paint_overlay(
             );
         }
         paint_listening_chrome(
-            buf,
-            w,
-            h,
-            state.cx,
-            state.cy,
-            menu,
-            settings,
-            hud,
-            mx,
-            my,
-            now_ms,
-            screen_w,
-            screen_h,
-            off_x,
-            off_y,
+            buf, w, h, state.cx, state.cy, menu, settings, hud, mx, my, now_ms, screen_w, screen_h,
+            off_x, off_y,
         );
     }
     let known = hud.auth_label != "UNKNOWN" && !hud.auth_label.is_empty();
@@ -827,15 +1082,24 @@ mod tests {
         let s = initial();
         let e = edges_far_to_near(&s);
         for i in 1..e.len() {
-            assert!(e[i].4 + 1e-5 >= e[i - 1].4, "{} then {}", e[i - 1].4, e[i].4);
+            assert!(
+                e[i].4 + 1e-5 >= e[i - 1].4,
+                "{} then {}",
+                e[i - 1].4,
+                e[i].4
+            );
         }
     }
 
     #[test]
     fn later_stroke_covers_earlier() {
         let mut buf = vec![0u8; 32 * 32 * 4];
-        stroke(&mut buf, 32, 32, 4.0, 16.0, 28.0, 16.0, 3.0, 10, 10, 10, 255);
-        stroke(&mut buf, 32, 32, 16.0, 4.0, 16.0, 28.0, 3.0, 200, 200, 200, 255);
+        stroke(
+            &mut buf, 32, 32, 4.0, 16.0, 28.0, 16.0, 3.0, 10, 10, 10, 255,
+        );
+        stroke(
+            &mut buf, 32, 32, 16.0, 4.0, 16.0, 28.0, 3.0, 200, 200, 200, 255,
+        );
         let i = (16 * 32 + 16) * 4;
         // Near-white core should win at the crossing.
         assert!(buf[i + 2] > 120, "r={}", buf[i + 2]);

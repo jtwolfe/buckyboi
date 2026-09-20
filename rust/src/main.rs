@@ -13,9 +13,9 @@ use buckyboi::identity::{
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
     initial_on, load_settings, overlay_bounds, save_settings, spin, step_overlay_avoid,
-    AuthSession, BuddyUx, EnrollKind, EnrollPhase, EnrollSession, GateMode, GazeLock,
-    GazeSmoother, GestureAction, GestureClass, IdentityHud, Phase, ProfileStore, RadialAction,
-    RadialMenu, Settings, SettingsPage, UxEvent, WizardHits, HIT_RADIUS,
+    AuthSession, BuddyUx, EnrollKind, EnrollPhase, EnrollSession, GateMode, GazeLock, GazeSmoother,
+    GestureAction, GestureClass, IdentityHud, Phase, ProfileStore, RadialAction, RadialMenu,
+    Settings, SettingsPage, UxEvent, WizardHits, HIT_RADIUS,
 };
 use std::env;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -426,25 +426,17 @@ fn apply_wizard_event(
         WizardEvent::None | WizardEvent::Opened => {}
         WizardEvent::BeginFace => {
             ensure_wizard_person(wizard, profiles, settings);
-            *enroll = EnrollSession::start_face(
-                wizard.person_name.clone(),
-                wizard.person_id.clone(),
-            );
+            *enroll =
+                EnrollSession::start_face(wizard.person_name.clone(), wizard.person_id.clone());
             enroll.begin_capture();
-            eprintln!(
-                "buckyboi: wizard FACE — look at the camera (or BUCKYBOI_FACE_SIM=1)"
-            );
+            eprintln!("buckyboi: wizard FACE — look at the camera (or BUCKYBOI_FACE_SIM=1)");
         }
         WizardEvent::BeginVoice => {
             ensure_wizard_person(wizard, profiles, settings);
-            *enroll = EnrollSession::start_voice(
-                wizard.person_name.clone(),
-                wizard.person_id.clone(),
-            );
+            *enroll =
+                EnrollSession::start_voice(wizard.person_name.clone(), wizard.person_id.clone());
             enroll.begin_capture();
-            eprintln!(
-                "buckyboi: wizard VOICE — speak ~1.5s × 3 or SKIP (BUCKYBOI_VOICE_SIM=1)"
-            );
+            eprintln!("buckyboi: wizard VOICE — speak ~1.5s × 3 or SKIP (BUCKYBOI_VOICE_SIM=1)");
         }
         WizardEvent::BeginHands(class) => {
             ensure_wizard_person(wizard, profiles, settings);

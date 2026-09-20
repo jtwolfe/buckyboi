@@ -294,7 +294,9 @@ impl FirstRunWizard {
     }
 
     fn finish(&mut self) -> WizardEvent {
-        let gate = self.suggested_gate.or_else(|| self.suggested_gate_for_enrolled());
+        let gate = self
+            .suggested_gate
+            .or_else(|| self.suggested_gate_for_enrolled());
         *self = Self::closed();
         if let Some(g) = gate {
             return WizardEvent::SuggestGate(g);
@@ -360,7 +362,12 @@ mod tests {
         assert_eq!(w.skip(), WizardEvent::BeginVoice);
         assert_eq!(w.step, WizardStep::Voice);
         assert_eq!(w.skip(), WizardEvent::BeginHands(GestureClass::Fist));
-        assert_eq!(w.step, WizardStep::Hands { class: GestureClass::Fist });
+        assert_eq!(
+            w.step,
+            WizardStep::Hands {
+                class: GestureClass::Fist
+            }
+        );
         assert_eq!(w.skip(), WizardEvent::None);
         assert_eq!(w.step, WizardStep::Done);
         assert!(w.can_add_another());
@@ -433,7 +440,12 @@ mod tests {
         w.advance();
         let _ = w.skip(); // face
         let _ = w.skip(); // voice
-        assert_eq!(w.step, WizardStep::Hands { class: GestureClass::Fist });
+        assert_eq!(
+            w.step,
+            WizardStep::Hands {
+                class: GestureClass::Fist
+            }
+        );
         assert_eq!(
             w.on_enroll_finished(EnrollKind::Gesture),
             WizardEvent::BeginHands(GestureClass::Palm)
