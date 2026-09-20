@@ -11,8 +11,8 @@ pub mod ux;
 
 pub use gaze::*;
 pub use identity::{
-    AuthSession, AuthState, EnrollKind, EnrollPhase, EnrollSession, GateMode, GestureAction,
-    GestureClass, ProfileStore,
+    AuthSession, AuthState, EnrollKind, EnrollPhase, EnrollSession, FirstRunWizard, GateMode,
+    GestureAction, GestureClass, ProfileStore, WizardEvent, WizardStep, LARGEST_FACE_CHIP,
 };
 pub use radial::*;
 pub use sim::*;

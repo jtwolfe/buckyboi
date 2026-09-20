@@ -1,8 +1,6 @@
 //! Listening-mode radial icons + attached settings panel (pure logic).
 
-use crate::identity::{
-    identity_ini_lines, parse_identity_ini, GateMode, IdentitySettings,
-};
+use crate::identity::{identity_ini_lines, parse_identity_ini, GateMode, IdentitySettings};
 use std::fs;
 use std::path::PathBuf;
 
@@ -58,6 +56,11 @@ pub enum RadialAction {
     StartEnrollVoice,
     StartEnrollHands,
     CancelEnroll,
+    OpenWizard,
+    WizardAdvance,
+    WizardSkip,
+    WizardCancel,
+    WizardAddAnother,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +98,13 @@ impl Settings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WizardHits {
+    pub can_skip: bool,
+    pub can_next: bool,
+    pub can_add: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct IdentityHud {
     pub auth_label: String,
@@ -102,11 +112,20 @@ pub struct IdentityHud {
     pub enroll_hint: String,
     pub enroll_progress: f32,
     pub enroll_active: bool,
+    pub wizard_open: bool,
+    pub wizard_title: String,
+    pub wizard_body: String,
+    pub wizard_progress: f32,
+    pub wizard_can_skip: bool,
+    pub wizard_can_next: bool,
+    pub wizard_can_add: bool,
+    pub face_chip: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct RadialMenu {
     pub settings_open: bool,
+    pub wizard_open: bool,
     pub muted: bool,
     pub flash_id: Option<IconId>,
     pub flash_until_ms: u64,
@@ -125,6 +144,7 @@ impl RadialMenu {
     pub fn new() -> Self {
         Self {
             settings_open: false,
+            wizard_open: false,
             muted: false,
             flash_id: None,
             flash_until_ms: 0,
@@ -135,9 +155,15 @@ impl RadialMenu {
 
     pub fn reset(&mut self) {
         self.settings_open = false;
+        self.wizard_open = false;
         self.flash_id = None;
         self.dragging_slider = None;
         self.freeze_ms = None;
+    }
+
+    /// Settings or first-run wizard — hide-timer pauses, orbit freezes.
+    pub fn panel_open(&self) -> bool {
+        self.settings_open || self.wizard_open
     }
 
     pub fn layout_ms(&self, now_ms: u64) -> u64 {
@@ -288,6 +314,18 @@ pub(crate) fn cancel_enroll_hit(px: f32, py: f32) -> (f32, f32, f32, f32) {
     (px + 10.0, py + 268.0, 70.0, 16.0)
 }
 
+pub(crate) fn wizard_next_hit(px: f32, py: f32) -> (f32, f32, f32, f32) {
+    id_btn(px, py, 0)
+}
+
+pub(crate) fn wizard_skip_hit(px: f32, py: f32) -> (f32, f32, f32, f32) {
+    id_btn(px, py, 1)
+}
+
+pub(crate) fn wizard_add_hit(px: f32, py: f32) -> (f32, f32, f32, f32) {
+    new_btn(px, py)
+}
+
 fn in_rect(mx: f32, my: f32, x: f32, y: f32, w: f32, h: f32) -> bool {
     mx >= x && my >= y && mx <= x + w && my <= y + h
 }
@@ -297,14 +335,8 @@ fn slider_value(mx: f32, track: (f32, f32, f32, f32), min: f32, max: f32) -> f32
     min + t * (max - min)
 }
 
-pub fn hit_panel(
-    mx: f32,
-    my: f32,
-    px: f32,
-    py: f32,
-    settings: &Settings,
-) -> RadialAction {
-    hit_panel_ex(mx, my, px, py, settings, 0, false)
+pub fn hit_panel(mx: f32, my: f32, px: f32, py: f32, settings: &Settings) -> RadialAction {
+    hit_panel_ex(mx, my, px, py, settings, 0, false, None)
 }
 
 pub fn hit_panel_ex(
@@ -315,10 +347,38 @@ pub fn hit_panel_ex(
     settings: &Settings,
     people_n: usize,
     enroll_active: bool,
+    wizard: Option<WizardHits>,
 ) -> RadialAction {
     let (cx, cy) = close_button(px, py);
     if (mx - cx).hypot(my - cy) <= CLOSE_R {
+        if wizard.is_some() {
+            return RadialAction::WizardCancel;
+        }
         return RadialAction::CloseSettings;
+    }
+    if let Some(wiz) = wizard {
+        if wiz.can_next {
+            let n = wizard_next_hit(px, py);
+            if in_rect(mx, my, n.0, n.1, n.2, n.3) {
+                return RadialAction::WizardAdvance;
+            }
+        }
+        if wiz.can_skip {
+            let s = wizard_skip_hit(px, py);
+            if in_rect(mx, my, s.0, s.1, s.2, s.3) {
+                return RadialAction::WizardSkip;
+            }
+        }
+        if wiz.can_add {
+            let a = wizard_add_hit(px, py);
+            if in_rect(mx, my, a.0, a.1, a.2, a.3) {
+                return RadialAction::WizardAddAnother;
+            }
+        }
+        if in_rect(mx, my, px, py, PANEL_W, PANEL_H) {
+            return RadialAction::None;
+        }
+        return RadialAction::None;
     }
     let look = tab_look_hit(px, py);
     if in_rect(mx, my, look.0, look.1, look.2, look.3) {
@@ -358,7 +418,7 @@ pub fn hit_panel_ex(
         }
         let nb = new_btn(px, py);
         if in_rect(mx, my, nb.0, nb.1, nb.2, nb.3) {
-            return RadialAction::NewPerson;
+            return RadialAction::OpenWizard;
         }
         let db = del_btn(px, py);
         if in_rect(mx, my, db.0, db.1, db.2, db.3) {
@@ -382,16 +442,37 @@ pub fn hit_panel_ex(
         return RadialAction::CycleGate;
     }
     let listen = slider_track(px, py, 0);
-    if in_rect(mx, my, listen.0 - 4.0, listen.1 - 6.0, listen.2 + 8.0, listen.3 + 12.0) {
+    if in_rect(
+        mx,
+        my,
+        listen.0 - 4.0,
+        listen.1 - 6.0,
+        listen.2 + 8.0,
+        listen.3 + 12.0,
+    ) {
         let v = slider_value(mx, listen, 2_000.0, 15_000.0) as u32;
         return RadialAction::SetListenMs(v);
     }
     let gaze = slider_track(px, py, 1);
-    if in_rect(mx, my, gaze.0 - 4.0, gaze.1 - 6.0, gaze.2 + 8.0, gaze.3 + 12.0) {
+    if in_rect(
+        mx,
+        my,
+        gaze.0 - 4.0,
+        gaze.1 - 6.0,
+        gaze.2 + 8.0,
+        gaze.3 + 12.0,
+    ) {
         return RadialAction::SetGazeMs(slider_value(mx, gaze, 2_000.0, 15_000.0) as u32);
     }
     let stroke = slider_track(px, py, 2);
-    if in_rect(mx, my, stroke.0 - 4.0, stroke.1 - 6.0, stroke.2 + 8.0, stroke.3 + 12.0) {
+    if in_rect(
+        mx,
+        my,
+        stroke.0 - 4.0,
+        stroke.1 - 6.0,
+        stroke.2 + 8.0,
+        stroke.3 + 12.0,
+    ) {
         return RadialAction::SetStroke(slider_value(mx, stroke, 0.8, 3.0));
     }
     if in_rect(mx, my, px, py, PANEL_W, PANEL_H) {
@@ -400,11 +481,20 @@ pub fn hit_panel_ex(
     RadialAction::None
 }
 
-pub fn apply_action(menu: &mut RadialMenu, settings: &mut Settings, action: RadialAction, now_ms: u64) {
+pub fn apply_action(
+    menu: &mut RadialMenu,
+    settings: &mut Settings,
+    action: RadialAction,
+    now_ms: u64,
+) {
     match action {
         RadialAction::ToggleSettings => {
             menu.settings_open = !menu.settings_open;
-            menu.freeze_ms = if menu.settings_open { Some(now_ms) } else { None };
+            menu.freeze_ms = if menu.settings_open {
+                Some(now_ms)
+            } else {
+                None
+            };
             menu.flash(IconId::Settings, now_ms);
         }
         RadialAction::CloseSettings => {
@@ -453,11 +543,16 @@ pub fn apply_action(menu: &mut RadialMenu, settings: &mut Settings, action: Radi
             settings.selected_person = i;
         }
         RadialAction::NewPerson
+        | RadialAction::OpenWizard
         | RadialAction::DeleteSelected
         | RadialAction::StartEnrollFace
         | RadialAction::StartEnrollVoice
         | RadialAction::StartEnrollHands
         | RadialAction::CancelEnroll
+        | RadialAction::WizardAdvance
+        | RadialAction::WizardSkip
+        | RadialAction::WizardCancel
+        | RadialAction::WizardAddAnother
         | RadialAction::None => {}
     }
 }
@@ -509,19 +604,20 @@ pub fn click_listening_ex(
     screen_h: f32,
     people_n: usize,
     enroll_active: bool,
+    wizard: Option<WizardHits>,
 ) -> RadialAction {
     let centers = icon_centers(cx, cy, menu.layout_ms(now_ms), true);
-    if menu.settings_open {
+    if menu.panel_open() {
         if let Some((_, sx, sy)) = centers.iter().find(|(id, _, _)| *id == IconId::Settings) {
             let (px, py, _, _) = panel_rect(*sx, *sy, screen_w, screen_h);
-            let act = hit_panel_ex(mx, my, px, py, settings, people_n, enroll_active);
+            let act = hit_panel_ex(mx, my, px, py, settings, people_n, enroll_active, wizard);
             if act != RadialAction::None {
                 apply_action(menu, settings, act, now_ms);
                 return act;
             }
         }
     }
-    if enroll_active {
+    if enroll_active || wizard.is_some() || menu.wizard_open {
         return RadialAction::None;
     }
     if let Some(id) = hit_icon(mx, my, &centers) {
@@ -560,8 +656,11 @@ pub fn overlay_bounds(
             x1 = x1.max(x + ICON_RADIUS + 3.0);
             y1 = y1.max(y + ICON_RADIUS + 3.0);
         }
-        if menu.settings_open {
-            if let Some((_, sx, sy)) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Settings)
+        if menu.panel_open() {
+            if let Some((_, sx, sy)) = centers
+                .iter()
+                .copied()
+                .find(|(id, _, _)| *id == IconId::Settings)
             {
                 let (px, py, pw, ph) = panel_rect(sx, sy, screen_w, screen_h);
                 x0 = x0.min(px);
@@ -594,9 +693,12 @@ pub fn hit_rects(
         for &(_, x, y) in &icon_centers(cx, cy, menu.layout_ms(now_ms), true) {
             r.push(circ_rect(x, y, ICON_RADIUS + 2.0));
         }
-        if menu.settings_open {
+        if menu.panel_open() {
             let centers = icon_centers(cx, cy, menu.layout_ms(now_ms), true);
-            if let Some((_, sx, sy)) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Settings)
+            if let Some((_, sx, sy)) = centers
+                .iter()
+                .copied()
+                .find(|(id, _, _)| *id == IconId::Settings)
             {
                 let (px, py, pw, ph) = panel_rect(sx, sy, screen_w, screen_h);
                 r.push((px as i16, py as i16, pw as u16, ph as u16));
@@ -769,7 +871,11 @@ mod tests {
         menu.settings_open = true;
         let mut s = Settings::default();
         let centers = icon_centers(400.0, 400.0, 0, false);
-        let (_, dx, dy) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Dismiss).unwrap();
+        let (_, dx, dy) = centers
+            .iter()
+            .copied()
+            .find(|(id, _, _)| *id == IconId::Dismiss)
+            .unwrap();
         let act = click_listening(&mut menu, &mut s, dx, dy, 400.0, 400.0, 1, 1920.0, 1200.0);
         assert_eq!(act, RadialAction::Dismiss);
         assert!(!menu.settings_open);
@@ -790,10 +896,7 @@ mod tests {
         apply_action(&mut menu, &mut s, act, 0);
         assert!(!s.camera);
         let (cx, cy) = close_button(px, py);
-        assert_eq!(
-            hit_panel(cx, cy, px, py, &s),
-            RadialAction::CloseSettings
-        );
+        assert_eq!(hit_panel(cx, cy, px, py, &s), RadialAction::CloseSettings);
     }
 
     #[test]
@@ -851,18 +954,54 @@ mod tests {
         let (px, py, _, _) = panel_rect(400.0, 400.0, 1920.0, 1200.0);
         let look = tab_look_hit(px, py);
         assert_eq!(
-            hit_panel_ex(look.0 + 2.0, look.1 + 2.0, px, py, &s, 1, false),
+            hit_panel_ex(look.0 + 2.0, look.1 + 2.0, px, py, &s, 1, false, None),
             RadialAction::TabLook
         );
         let face = id_btn(px, py, 0);
         assert_eq!(
-            hit_panel_ex(face.0 + 2.0, face.1 + 2.0, px, py, &s, 1, false),
+            hit_panel_ex(face.0 + 2.0, face.1 + 2.0, px, py, &s, 1, false, None),
             RadialAction::StartEnrollFace
         );
         let c = cancel_enroll_hit(px, py);
         assert_eq!(
-            hit_panel_ex(c.0 + 2.0, c.1 + 2.0, px, py, &s, 1, true),
+            hit_panel_ex(c.0 + 2.0, c.1 + 2.0, px, py, &s, 1, true, None),
             RadialAction::CancelEnroll
+        );
+        let add = new_btn(px, py);
+        assert_eq!(
+            hit_panel_ex(add.0 + 2.0, add.1 + 2.0, px, py, &s, 0, false, None),
+            RadialAction::OpenWizard
+        );
+    }
+
+    #[test]
+    fn wizard_hits_advance_skip_cancel() {
+        let s = Settings::default();
+        let (px, py, _, _) = panel_rect(400.0, 400.0, 1920.0, 1200.0);
+        let hits = WizardHits {
+            can_skip: true,
+            can_next: true,
+            can_add: true,
+        };
+        let next = wizard_next_hit(px, py);
+        assert_eq!(
+            hit_panel_ex(next.0 + 2.0, next.1 + 2.0, px, py, &s, 0, false, Some(hits)),
+            RadialAction::WizardAdvance
+        );
+        let skip = wizard_skip_hit(px, py);
+        assert_eq!(
+            hit_panel_ex(skip.0 + 2.0, skip.1 + 2.0, px, py, &s, 0, false, Some(hits)),
+            RadialAction::WizardSkip
+        );
+        let add = wizard_add_hit(px, py);
+        assert_eq!(
+            hit_panel_ex(add.0 + 2.0, add.1 + 2.0, px, py, &s, 0, false, Some(hits)),
+            RadialAction::WizardAddAnother
+        );
+        let (cx, cy) = close_button(px, py);
+        assert_eq!(
+            hit_panel_ex(cx, cy, px, py, &s, 0, false, Some(hits)),
+            RadialAction::WizardCancel
         );
     }
 }

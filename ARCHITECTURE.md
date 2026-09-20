@@ -18,7 +18,7 @@ toy and are not on the overlay / identity path.
 │   ux.rs         VisibleIdle / Listening / Hidden            │
 │   gaze.rs       look-target + dwell lock (pure)             │
 │   camera.rs     V4L2 → gaze + latest RGB frame              │
-│   radial.rs     icons + settings (UX / ID pages)            │
+│   radial.rs     icons + settings (UX / ID) + first-run wizard hits            │
 │   draw.rs       depth-sorted strokes + panel + auth chip    │
 │   identity/     local multi-person gate (this doc)          │
 └─────────────────────────────────────────────────────────────┘
@@ -32,7 +32,8 @@ All matching is **local and fail-closed**. Nothing leaves the machine.
 | --- | --- | --- |
 | `embed.rs` | L2 + cosine + gallery match | — |
 | `gate.rs` | `Off / Face / Voice / Any / All` | — |
-| `enroll.rs` | face / voice / gesture wizards | — |
+| `enroll.rs` | face / voice / gesture machines | — |
+| `wizard.rs` | first-run / add-person FSM (name → face → voice → hands) | — |
 | `persist.rs` | `~/.config/buckyboi/profiles.json` | — |
 | `align.rs` | InsightFace `arcface_dst` similarity + warpAffine | — |
 | `scrfd.rs` | letterbox / decode / NMS / largest-central pick | `face` → `ort` `det_10g.onnx` |

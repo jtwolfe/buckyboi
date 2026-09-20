@@ -13,6 +13,7 @@ pub mod palm;
 pub mod persist;
 pub mod scrfd;
 pub mod voice;
+pub mod wizard;
 
 pub use embed::*;
 pub use enroll::*;
@@ -30,6 +31,7 @@ pub use voice::{
     logmel_embed, pick_speaker_model, speech_energy, voice_cosine_threshold, VoiceQuality,
     VoiceReject, VOICE_ENROLL_NEED, VOICE_MIN_MS, VOICE_THRESHOLD_SHERPA,
 };
+pub use wizard::{FirstRunWizard, WizardEvent, WizardStep, LARGEST_FACE_CHIP};
 
 /// Vision / identity ONNX cadence (~12.5 Hz) so the overlay stays at 60 Hz.
 pub const VISION_INFER_MS: u64 = 80;
