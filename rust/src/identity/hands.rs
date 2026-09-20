@@ -349,15 +349,42 @@ pub fn landmark_model_names() -> &'static [&'static str] {
     ]
 }
 
-/// Two-stage palm → landmark when `--features hands` and models exist.
-#[cfg(feature = "hands")]
-pub fn extract_landmarks_onnx(rgb: &[u8], w: u32, h: u32) -> Option<HandLandmarks> {
-    onnx::detect(rgb, w, h)
+#[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum HandStatus {
+    NoModel,
+    NoHand,
+    Ok(HandLandmarks),
 }
 
-#[cfg(not(feature = "hands"))]
-pub fn extract_landmarks_onnx(_rgb: &[u8], _w: u32, _h: u32) -> Option<HandLandmarks> {
-    None
+pub fn palm_files_present(dir: &std::path::Path) -> bool {
+    palm_model_names().iter().any(|n| dir.join(n).is_file())
+}
+
+/// Cheap: palm model names in `models_dir()` via `Path::is_file`. No Session.
+pub fn models_present() -> bool {
+    crate::identity::models_dir()
+        .map(|dir| palm_files_present(&dir))
+        .unwrap_or(false)
+}
+
+/// Palm + landmark. `NoModel` if weights are missing, `NoHand` on a miss.
+pub fn extract_status(rgb: &[u8], w: u32, h: u32) -> HandStatus {
+    if !models_present() {
+        return HandStatus::NoModel;
+    }
+    #[cfg(feature = "hands")]
+    {
+        match onnx::detect(rgb, w, h) {
+            Some(h) => HandStatus::Ok(h),
+            None => HandStatus::NoHand,
+        }
+    }
+    #[cfg(not(feature = "hands"))]
+    {
+        let _ = (rgb, w, h);
+        HandStatus::NoModel
+    }
 }
 
 #[cfg(feature = "hands")]
@@ -394,16 +421,9 @@ mod onnx {
             return Some(());
         }
         let palm_path = find(palm_model_names())?;
-        let palm = ort::session::Session::builder()
-            .ok()?
-            .commit_from_file(&palm_path)
-            .ok()?;
-        let landmark = find(landmark_model_names()).and_then(|p| {
-            ort::session::Session::builder()
-                .ok()?
-                .commit_from_file(&p)
-                .ok()
-        });
+        let palm = crate::identity::ort_sess::session_from_file(&palm_path)?;
+        let landmark = find(landmark_model_names())
+            .and_then(|p| crate::identity::ort_sess::session_from_file(&p));
         eprintln!(
             "buckyboi: hands ONNX palm={} landmark={}",
             palm_path.display(),
@@ -626,5 +646,28 @@ mod tests {
             action_for(GestureClass::Fist, &DEFAULT_GESTURE_MAP),
             GestureAction::Dismiss
         );
+    }
+
+    #[test]
+    fn models_present_empty_dir_does_not_build_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "buckyboi-hands-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!palm_files_present(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_status_no_model_on_empty_rgb() {
+        match extract_status(&[0u8; 12], 2, 2) {
+            HandStatus::NoModel | HandStatus::NoHand => {}
+            HandStatus::Ok(_) => panic!("empty 2x2 should not yield landmarks"),
+        }
     }
 }

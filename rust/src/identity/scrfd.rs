@@ -330,10 +330,7 @@ mod onnx {
             return Some(());
         }
         let path = find_det_model()?;
-        let sess = ort::session::Session::builder()
-            .ok()?
-            .commit_from_file(&path)
-            .ok()?;
+        let sess = crate::identity::ort_sess::session_from_file(&path)?;
         *g = Some(Det { session: sess });
         eprintln!("buckyboi: SCRFD detector {}", path.display());
         Some(())

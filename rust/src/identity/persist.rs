@@ -320,6 +320,19 @@ impl ProfileStore {
     pub fn next_default_name(&self) -> String {
         format!("P{}", self.file.people.len() + 1)
     }
+
+    /// Distinct `Embedding.kind` values currently stored as face vectors.
+    pub fn face_kinds(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in &self.file.people {
+            for e in &p.face {
+                if !out.contains(&e.kind) {
+                    out.push(e.kind.clone());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Identity knobs that live next to the overlay look sliders.
@@ -425,6 +438,21 @@ mod tests {
         let b = store.upsert_named("ada");
         assert_eq!(a, b);
         assert_eq!(store.enrolled_count(), 1);
+    }
+
+    #[test]
+    fn face_kinds_unique() {
+        let mut store = ProfileStore::empty();
+        let id = store.upsert_named("Ada");
+        store.add_face(
+            &id,
+            vec![
+                Embedding::new("arcface", vec![1.0, 0.0]),
+                Embedding::new("arcface", vec![0.0, 1.0]),
+            ],
+        );
+        assert_eq!(store.face_kinds(), vec!["arcface".to_string()]);
+        assert!(ProfileStore::empty().face_kinds().is_empty());
     }
 
     #[test]

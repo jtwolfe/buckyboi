@@ -415,8 +415,18 @@ mod tests {
 
     #[test]
     fn tone_is_accepted_and_embedded() {
+        let dir = std::env::temp_dir().join(format!(
+            "buckyboi-voice-nomodel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let s = tone(220.0, 1600, 0.2);
-        let (q, emb) = extract_embedding(&s, 16_000);
+        let (q, emb) = crate::identity::with_models_dir(&dir, || extract_embedding(&s, 16_000));
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(q.ok, "{q:?}");
         let emb = emb.expect("embed");
         assert_eq!(emb.kind, VOICE_KIND_LOGMEL);

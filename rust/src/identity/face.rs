@@ -363,13 +363,34 @@ pub fn probe_embed(rgb: &[u8], w: u32, h: u32, bbox: FaceBox) -> Embedding {
 
 /// Extract an embedding. Prefers detect → align → ArcFace when models exist.
 pub fn extract_embedding(rgb: &[u8], w: u32, h: u32) -> (FaceQuality, Option<Embedding>) {
+    extract_parts(rgb, w, h, true)
+}
+
+/// Detect + quality + look publish. ArcFace / probe only when `want_embed`.
+pub fn extract_parts(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    want_embed: bool,
+) -> (FaceQuality, Option<Embedding>) {
     let (n, Some(face)) = detect_counted(rgb, w, h) else {
         return (FaceQuality::reject(FaceReject::NoFace), None);
     };
     let (crop, aligned) = crop_for_quality(rgb, w, h, &face);
     let mut q = quality_from_crop(&crop, face.bbox, w, h, n);
-    publish_primary(&face, w, h, n, face.kps.is_some());
+    publish_look(FaceLook {
+        cx: face.cx(),
+        cy: face.cy(),
+        fw: w as f32,
+        fh: h as f32,
+        t_ms: now_ms_soft(),
+        from_scrfd: face.kps.is_some(),
+        faces: n,
+    });
     if !q.ok {
+        return (q, None);
+    }
+    if !want_embed {
         return (q, None);
     }
     let _ = aligned;
@@ -421,10 +442,7 @@ mod onnx {
             .and_then(|s| s.to_str())
             .unwrap_or("arcface")
             .to_string();
-        let sess = ort::session::Session::builder()
-            .ok()?
-            .commit_from_file(&path)
-            .ok()?;
+        let sess = crate::identity::ort_sess::session_from_file(&path)?;
         eprintln!(
             "buckyboi: ArcFace {} (cosine ~{:.2})",
             name,
@@ -460,6 +478,12 @@ mod onnx {
         }
         Some(Embedding::new(FACE_KIND_ARCFACE, data))
     }
+
+    pub fn drop_rec() {
+        if let Ok(mut g) = REC.lock() {
+            *g = None;
+        }
+    }
 }
 
 #[cfg(feature = "face")]
@@ -470,6 +494,12 @@ pub fn loaded_rec_model_name() -> Option<String> {
 #[cfg(not(feature = "face"))]
 pub fn loaded_rec_model_name() -> Option<String> {
     None
+}
+
+/// Drop the ArcFace session so the next embed recommits.
+pub fn reload_rec() {
+    #[cfg(feature = "face")]
+    onnx::drop_rec();
 }
 
 #[cfg(test)]
@@ -536,8 +566,18 @@ mod tests {
     #[test]
     fn extract_without_probe_flag_fails_closed() {
         std::env::remove_var("BUCKYBOI_FACE_PROBE");
+        let dir = std::env::temp_dir().join(format!(
+            "buckyboi-face-nomodel-{}-{}",
+            std::process::id(),
+            now_ms_soft()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let rgb = skin_patch(80, 60);
-        let (q, emb) = extract_embedding(&rgb, 80, 60);
+        let (q, emb) = crate::identity::with_models_dir(&dir, || {
+            reload_rec();
+            extract_embedding(&rgb, 80, 60)
+        });
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(emb.is_none());
         assert_eq!(q.reject, FaceReject::NoEmbed);
     }
