@@ -30,11 +30,15 @@ works after the layer has OnDemand keyboard focus (click the buddy);
 Pipeline, all local / offline:
 
 1. V4L2 capture (`/dev/video0` or `BUCKYBOI_CAMERA`) at ~320×240, YUYV or MJPEG.
-2. Skin-colored blob (YCbCr) → face center. Dark pixels in the upper half → iris proxy.
+2. If `--features face` and `det_10g.onnx` are present, SCRFD supplies the
+   face box (largest / most central when several people are visible).
+   Otherwise: skin-colored blob (YCbCr) → face center; dark pixels in the
+   upper half → iris proxy.
 3. Face/iris mapped to screen with a gain and a horizontal **mirror**.
 4. Exponential smooth (`GAZE_SMOOTH` = 0.14). Hold last sample 280 ms if a frame misses.
 
-RGB frames are also stashed for face / hand identity. `BUCKYBOI_NO_CAMERA=1`
+RGB frames are also stashed for face / hand identity. ONNX identity runs
+at ~12.5 Hz so the overlay can stay near 60 Hz. `BUCKYBOI_NO_CAMERA=1`
 or a failed open **falls back** to mouse-avoid + click-to-listen.
 
 ### Gaze-follow lock
@@ -84,9 +88,12 @@ Settings → **ID**:
 1. **NEW** creates `P1`, `P2`, … (rename later by editing `profiles.json` if you want a real name).
 2. Select a row.
 3. **FACE** — “LOOK AT CAM”. Eight frames must pass area / brightness / sharpness.
-   Missing ArcFace model → no save unless `BUCKYBOI_FACE_PROBE=1`.
-4. **VOICE** — “SAY PHRASE”. Three clips ≥ 1.2 s with enough energy.
-   No mic → `BUCKYBOI_VOICE_SIM=1` (tone) for bringing up the wizard.
+   Rejects show as **NO FACE / TOO DARK / TOO BLURRY / TOO SMALL /
+   TOO CLOSE / NO MODEL**. Missing ArcFace model → no save unless
+   `BUCKYBOI_FACE_PROBE=1`.
+4. **VOICE** — “SAY PHRASE”. Three clips ≥ 1.2 s with enough energy
+   (**TOO SHORT** / **TOO QUIET**). Prefer the English sherpa model
+   when present. No mic → `BUCKYBOI_VOICE_SIM=1` (tone) for bringing up the wizard.
 5. **HAND** — guided holds, starting at **FIST**. Use `BUCKYBOI_HAND_SIM=fist`
    (then `palm`, `thumb`, `point`, `peace`) without a camera.
 6. **DEL** removes that person. **CANCEL** aborts a running wizard.

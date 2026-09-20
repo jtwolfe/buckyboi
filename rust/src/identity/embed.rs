@@ -2,8 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_FACE_THRESHOLD: f32 = 0.38;
-pub const DEFAULT_VOICE_THRESHOLD: f32 = 0.62;
+/// R50 working point. MBF should use 0.40 — see `face::face_cosine_threshold`.
+pub const DEFAULT_FACE_THRESHOLD: f32 = 0.35;
+/// Sherpa speaker manager search. Log-mel fallback is slightly higher (0.62).
+pub const DEFAULT_VOICE_THRESHOLD: f32 = 0.60;
 pub const DEFAULT_GESTURE_THRESHOLD: f32 = 0.78;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -143,7 +145,11 @@ mod tests {
     fn match_picks_highest_over_threshold() {
         let probe = e("arcface", vec![1.0, 0.0]);
         let gal = vec![
-            ("p1".into(), "Ada".into(), vec![e("arcface", vec![0.95, 0.05])]),
+            (
+                "p1".into(),
+                "Ada".into(),
+                vec![e("arcface", vec![0.95, 0.05])],
+            ),
             ("p2".into(), "Bo".into(), vec![e("arcface", vec![0.2, 0.9])]),
         ];
         let hit = best_match(&probe, &gal, 0.5).unwrap();

@@ -92,7 +92,13 @@ impl AuthState {
         }
     }
 
-    pub fn matched(id: impl Into<String>, name: impl Into<String>, via: AuthVia, until_ms: u64, score: f32) -> Self {
+    pub fn matched(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        via: AuthVia,
+        until_ms: u64,
+        score: f32,
+    ) -> Self {
         Self {
             person_id: Some(id.into()),
             name: Some(name.into()),
@@ -220,12 +226,8 @@ impl AuthSession {
     pub fn allows_listen(&self, mode: GateMode, now_ms: u64) -> bool {
         match mode {
             GateMode::Off => true,
-            GateMode::Face => {
-                self.face_id.is_some() && now_ms < self.face_until
-            }
-            GateMode::Voice => {
-                self.voice_id.is_some() && now_ms < self.voice_until
-            }
+            GateMode::Face => self.face_id.is_some() && now_ms < self.face_until,
+            GateMode::Voice => self.voice_id.is_some() && now_ms < self.voice_until,
             GateMode::Any => {
                 (self.face_id.is_some() && now_ms < self.face_until)
                     || (self.voice_id.is_some() && now_ms < self.voice_until)

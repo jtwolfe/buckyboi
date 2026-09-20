@@ -1,15 +1,15 @@
 //! People, embeddings, and gesture maps under `~/.config/buckyboi/`.
 
+use crate::identity::config_dir;
 use crate::identity::embed::{
     best_match, Embedding, MatchHit, DEFAULT_FACE_THRESHOLD, DEFAULT_GESTURE_THRESHOLD,
     DEFAULT_VOICE_THRESHOLD,
 };
+use crate::identity::face::{FACE_KIND_ARCFACE, FACE_KIND_PROBE};
 use crate::identity::gate::GateMode;
 use crate::identity::hands::{
     gesture_centroid, GestureAction, GestureClass, GestureMap, DEFAULT_GESTURE_MAP,
 };
-use crate::identity::face::{FACE_KIND_ARCFACE, FACE_KIND_PROBE};
-use crate::identity::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -40,7 +40,11 @@ impl Person {
             .take(12)
             .collect::<String>()
             .to_ascii_lowercase();
-        let slug = if slug.is_empty() { "person".into() } else { slug };
+        let slug = if slug.is_empty() {
+            "person".into()
+        } else {
+            slug
+        };
         Self {
             id: format!("{slug}-{created_ms:x}"),
             name,
@@ -204,7 +208,12 @@ impl ProfileStore {
     }
 
     pub fn upsert_named(&mut self, name: &str) -> String {
-        if let Some(p) = self.file.people.iter().find(|p| p.name.eq_ignore_ascii_case(name)) {
+        if let Some(p) = self
+            .file
+            .people
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        {
             return p.id.clone();
         }
         let p = Person::new(name);
@@ -244,7 +253,10 @@ impl ProfileStore {
             p.gesture_samples.retain(|s| s.class != class);
             for lm in landmarks {
                 p.gesture_samples
-                    .push(crate::identity::hands::GestureSample { class, landmarks: lm });
+                    .push(crate::identity::hands::GestureSample {
+                        class,
+                        landmarks: lm,
+                    });
             }
         }
     }
@@ -268,7 +280,12 @@ impl ProfileStore {
             .iter()
             .map(|p| (p.id.clone(), p.name.clone(), p.face.clone()))
             .collect();
-        best_match(probe, &gal, self.file.face_threshold)
+        let model = crate::identity::face::loaded_rec_model_name();
+        let thresh = crate::identity::face::effective_face_threshold(
+            self.file.face_threshold,
+            model.as_deref(),
+        );
+        best_match(probe, &gal, thresh)
     }
 
     pub fn match_voice(&self, probe: &Embedding) -> Option<MatchHit> {
@@ -278,7 +295,22 @@ impl ProfileStore {
             .iter()
             .map(|p| (p.id.clone(), p.name.clone(), p.voice.clone()))
             .collect();
-        best_match(probe, &gal, self.file.voice_threshold)
+        let model = crate::identity::voice::pick_speaker_model(
+            crate::identity::models_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .as_path(),
+        );
+        let name = model
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str());
+        let thresh = crate::identity::voice::voice_cosine_threshold(name);
+        let thresh = if (self.file.voice_threshold - DEFAULT_VOICE_THRESHOLD).abs() < 1e-4 {
+            thresh
+        } else {
+            self.file.voice_threshold
+        };
+        best_match(probe, &gal, thresh)
     }
 
     pub fn enrolled_count(&self) -> usize {
@@ -346,7 +378,9 @@ pub fn identity_ini_lines(s: &IdentitySettings) -> String {
 }
 
 pub fn face_kinds_compatible(a: &str, b: &str) -> bool {
-    a == b || (a == FACE_KIND_ARCFACE && b == FACE_KIND_ARCFACE) || (a == FACE_KIND_PROBE && b == FACE_KIND_PROBE)
+    a == b
+        || (a == FACE_KIND_ARCFACE && b == FACE_KIND_ARCFACE)
+        || (a == FACE_KIND_PROBE && b == FACE_KIND_PROBE)
 }
 
 #[cfg(test)]
@@ -396,7 +430,10 @@ mod tests {
     #[test]
     fn identity_ini() {
         let mut s = IdentitySettings::default();
-        parse_identity_ini("gate=all\ngestures_need_face=0\nface_threshold=0.5\n", &mut s);
+        parse_identity_ini(
+            "gate=all\ngestures_need_face=0\nface_threshold=0.5\n",
+            &mut s,
+        );
         assert_eq!(s.gate, GateMode::All);
         assert!(!s.gestures_need_face);
         assert!((s.face_threshold - 0.5).abs() < 1e-5);
