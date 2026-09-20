@@ -1,0 +1,70 @@
+# CI for every PR and push to main.
+#
+# This repo previously failed Actions with no runner allocated (GitHub
+# spending limit). The workflow itself is complete; jobs stay queued or
+# never start until the owner clears Actions billing:
+#   https://github.com/jtwolfe/buckyboi/settings/billing
+# A red / missing badge is not proof the tree is broken.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy
+
+      - name: system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential g++ \
+            clang libclang-dev pkg-config cmake \
+            libwayland-dev libxkbcommon-dev \
+            libx11-dev libxext-dev libxfixes-dev \
+            libasound2-dev libpipewire-0.3-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          cache-on-failure: true
+
+      - name: test (default features — gaze + X11 + Wayland)
+        run: cargo test --manifest-path rust/Cargo.toml --locked
+
+      - name: test (--no-default-features; both display backends still compile)
+        run: cargo test --manifest-path rust/Cargo.toml --locked --no-default-features
+
+      - name: test (--features face,hands,voice)
+        run: |
+          # sherpa-onnx / ort need libstdc++. rustc links with `cc`, which
+          # does not search the g++ library dir unless LIBRARY_PATH is set.
+          GCC_LIBDIR="$(dirname "$(g++ -print-file-name=libstdc++.so)")"
+          export LIBRARY_PATH="${GCC_LIBDIR}${LIBRARY_PATH:+:$LIBRARY_PATH}"
+          cargo test --manifest-path rust/Cargo.toml --locked --features face,hands,voice
+
+      # Not -D warnings: draw/radial argument counts and similar style lints.
+      # Default clippy still fails the job on deny-level lints.
+      - name: clippy (default features)
+        run: cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets
+
+      - name: clippy (--no-default-features)
+        run: cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets --no-default-features

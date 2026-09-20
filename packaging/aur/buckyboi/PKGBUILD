@@ -1,0 +1,67 @@
+# Maintainer: buckyboi contributors <https://github.com/jtwolfe/buckyboi>
+#
+# Stable package from a GitHub version tag (v$pkgver). After the first
+# tag, replace sha256sums=('SKIP') with `updpkgsums` output and refresh
+# .SRCINFO (`makepkg --printsrcinfo > .SRCINFO`).
+#
+# Models are not packaged. See /usr/share/buckyboi/download-models.sh.
+
+pkgname=buckyboi
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="Linux desktop overlay buddy — gaze, gesture, and local multi-person identity"
+arch=('x86_64')
+url="https://github.com/jtwolfe/buckyboi"
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'wayland' 'libxkbcommon')
+makedepends=('cargo' 'clang' 'pkgconf')
+optdepends=(
+  'libx11: X11 / XWayland fallback sessions'
+  'libxext: X11 Shape'
+  'libxfixes: X11 click-through'
+  'v4l-utils: inspect webcam devices'
+  'alsa-lib: rebuild with --features voice (ALSA)'
+  'pipewire: microphone for a local --features voice build'
+)
+conflicts=('buckyboi-git')
+options=(!lto)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/jtwolfe/buckyboi/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" --manifest-path rust/Cargo.toml
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # Default features: overlay + gaze. Identity ONNX stays a local rebuild.
+  cargo build --frozen --release --manifest-path rust/Cargo.toml
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --manifest-path rust/Cargo.toml
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/buckyboi "$pkgdir/usr/bin/buckyboi"
+  install -Dm644 packaging/linux/buckyboi.desktop \
+    "$pkgdir/usr/share/applications/buckyboi.desktop"
+  install -Dm644 packaging/linux/buckyboi.1 \
+    "$pkgdir/usr/share/man/man1/buckyboi.1"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 packaging/linux/README.md \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+  # Snippet only — never write ~/.config/hypr/hyprland.conf from this package.
+  install -Dm644 contrib/omarchy/hyprland.conf \
+    "$pkgdir/usr/share/buckyboi/hyprland.conf"
+  install -Dm755 scripts/download-models.sh \
+    "$pkgdir/usr/share/buckyboi/download-models.sh"
+}

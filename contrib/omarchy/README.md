@@ -17,6 +17,11 @@ cargo run --release --manifest-path rust/Cargo.toml
 # cargo install --path rust
 ```
 
+Packaged install (AUR PKGBUILD in-tree, or a GitHub Release `.deb` /
+tarball): see the **Install (packages)** section in the root README.
+The Hyprland snippet is also installed to `/usr/share/buckyboi/` —
+do not let a package overwrite `~/.config/hypr/hyprland.conf`.
+
 Needs Rust **1.88+** (`rust/rust-toolchain.toml`).
 
 ## Hyprland

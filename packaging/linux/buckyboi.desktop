@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=buckyboi
+GenericName=Desktop overlay buddy
+Comment=Fullscreen click-through overlay buddy (gaze, gesture, local identity)
+Exec=buckyboi
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=overlay;wayland;hyprland;gaze;
+StartupNotify=false
+# Overlay is typically started from the compositor (exec-once), not a dock.
+# Still listed so a session without Hyprland binds can launch it.
