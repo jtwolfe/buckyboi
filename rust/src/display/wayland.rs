@@ -149,10 +149,7 @@ impl WaylandDisplay {
         }
 
         // Map a fully click-through transparent buffer so the surface exists.
-        {
-            let qh = event_queue.handle();
-            commit_clear(&mut app, &qh)?;
-        }
+        commit_clear(&mut app)?;
         conn.flush()?;
 
         eprintln!(
@@ -205,7 +202,7 @@ impl WaylandDisplay {
         self.app.hidden = false;
         let qh = self.event_queue.handle();
         apply_hits(&self.app, &qh, hits);
-        commit_pixels(&mut self.app, &qh, pixels, origin)?;
+        commit_pixels(&mut self.app, pixels, origin)?;
         self.conn.flush()?;
         Ok(())
     }
@@ -215,7 +212,11 @@ impl WaylandDisplay {
         self.app.hidden = true;
         let qh = self.event_queue.handle();
         apply_hits(&self.app, &qh, &[]);
-        commit_clear(&mut self.app, &qh)?;
+        // No released slot required — same as shutdown.
+        self.app.layer.wl_surface().attach(None, 0, 0);
+        self.app.layer.commit();
+        self.app.buf_rect = [None, None];
+        self.app.prev_rect = None;
         self.conn.flush()?;
         Ok(())
     }
@@ -361,7 +362,6 @@ fn pick_released(app: &mut WaylandApp) -> Result<Option<usize>, Box<dyn std::err
 fn paint_slot(
     app: &mut WaylandApp,
     i: usize,
-    full: bool,
     leftover: Option<(i16, i16, u16, u16)>,
     origin: (i16, i16, u16, u16),
     pixels: Option<&[u8]>,
@@ -375,10 +375,9 @@ fn paint_slot(
     let Some(canvas) = canvas else {
         return false;
     };
-    if full {
-        canvas.fill(0);
-    } else if let Some(old) = leftover {
-        zero_rect(canvas, w, h, old);
+    match leftover {
+        None => canvas.fill(0),
+        Some(old) => zero_rect(canvas, w, h, old),
     }
     if let Some(px) = pixels {
         blit_argb(canvas, w, h, origin, px);
@@ -386,50 +385,41 @@ fn paint_slot(
     true
 }
 
-fn attach_commit(app: &mut WaylandApp, i: usize) -> bool {
-    {
-        let surface = app.layer.wl_surface();
-        let Some(buf) = app.buffers[i].as_ref() else {
-            return false;
-        };
-        if buf.attach_to(surface).is_err() {
-            return false;
-        }
-    }
-    app.layer.commit();
-    true
+fn attach_slot(app: &mut WaylandApp, i: usize) -> bool {
+    let surface = app.layer.wl_surface();
+    let Some(buf) = app.buffers[i].as_ref() else {
+        return false;
+    };
+    buf.attach_to(surface).is_ok()
 }
 
-fn commit_clear(
-    app: &mut WaylandApp,
-    qh: &QueueHandle<WaylandApp>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = qh;
+fn commit_clear(app: &mut WaylandApp) -> Result<(), Box<dyn std::error::Error>> {
     let w = app.width.max(1);
     let h = app.height.max(1);
     let Some(i) = pick_released(app)? else {
         return Ok(());
     };
-    if !paint_slot(app, i, true, None, (0, 0, 0, 0), None) {
+    if !paint_slot(app, i, None, (0, 0, 0, 0), None) {
+        return Ok(());
+    }
+    if !attach_slot(app, i) {
+        app.buf_rect[i] = None;
         return Ok(());
     }
     app.layer
         .wl_surface()
         .damage_buffer(0, 0, w as i32, h as i32);
-    if attach_commit(app, i) {
-        app.buf_rect[i] = Some((0, 0, 0, 0));
-        app.prev_rect = None;
-    }
+    app.layer.commit();
+    app.buf_rect[i] = Some((0, 0, 0, 0));
+    app.prev_rect = None;
     Ok(())
 }
 
 fn commit_pixels(
     app: &mut WaylandApp,
-    qh: &QueueHandle<WaylandApp>,
     pixels: &[u8],
     origin: (i16, i16, u16, u16),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = qh;
     let w = app.width.max(1);
     let h = app.height.max(1);
     let Some(i) = pick_released(app)? else {
@@ -437,25 +427,31 @@ fn commit_pixels(
         return Ok(());
     };
     let leftover = app.buf_rect[i];
-    let full = leftover.is_none();
     let prev = app.prev_rect;
-    if !paint_slot(app, i, full, leftover, origin, Some(pixels)) {
+    if !paint_slot(app, i, leftover, origin, Some(pixels)) {
         return Ok(());
     }
-    if full {
+    if !attach_slot(app, i) {
+        app.buf_rect[i] = None;
+        return Ok(());
+    }
+    if leftover.is_none() {
         app.layer
             .wl_surface()
             .damage_buffer(0, 0, w as i32, h as i32);
     } else {
-        let (dx, dy, dw, dh) = pad_rect(union_opt(prev, origin), w, h);
+        let dmg = match prev {
+            Some(p) => union_rect(p, origin),
+            None => origin,
+        };
+        let (dx, dy, dw, dh) = pad_rect(dmg, w, h);
         if dw > 0 && dh > 0 {
             app.layer.wl_surface().damage_buffer(dx, dy, dw, dh);
         }
     }
-    if attach_commit(app, i) {
-        app.buf_rect[i] = Some(origin);
-        app.prev_rect = Some(origin);
-    }
+    app.layer.commit();
+    app.buf_rect[i] = Some(origin);
+    app.prev_rect = Some(origin);
     Ok(())
 }
 
@@ -505,13 +501,6 @@ fn union_rect(a: (i16, i16, u16, u16), b: (i16, i16, u16, u16)) -> (i16, i16, u1
     let w = (x1 - i32::from(x0)).clamp(0, i32::from(u16::MAX)) as u16;
     let h = (y1 - i32::from(y0)).clamp(0, i32::from(u16::MAX)) as u16;
     (x0, y0, w, h)
-}
-
-fn union_opt(a: Option<(i16, i16, u16, u16)>, b: (i16, i16, u16, u16)) -> (i16, i16, u16, u16) {
-    match a {
-        Some(a) => union_rect(a, b),
-        None => b,
-    }
 }
 
 fn pad_rect(r: (i16, i16, u16, u16), dw: u32, dh: u32) -> (i32, i32, i32, i32) {
@@ -879,8 +868,7 @@ mod tests {
             union_rect((10, 10, 20, 20), (20, 15, 20, 20)),
             (10, 10, 30, 25)
         );
-        assert_eq!(union_opt(Some((4, 8, 2, 2)), (10, 8, 2, 2)), (4, 8, 8, 2));
-        assert_eq!(union_opt(None, (5, 6, 7, 8)), (5, 6, 7, 8));
+        assert_eq!(union_rect((4, 8, 2, 2), (10, 8, 2, 2)), (4, 8, 8, 2));
         assert_eq!(union_rect((0, 0, 0, 0), (5, 6, 7, 8)), (5, 6, 7, 8));
     }
 
