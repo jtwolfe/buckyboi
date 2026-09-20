@@ -1,5 +1,7 @@
 # buckyboi
 
+[![CI](https://github.com/jtwolfe/buckyboi/actions/workflows/ci.yml/badge.svg)](https://github.com/jtwolfe/buckyboi/actions/workflows/ci.yml)
+
 A Linux-desktop overlay **buddy**: a rotating wireframe icosahedron that
 floats above your windows, lazily avoids your look, and can **identify
 one or many people** by face, voice, or gesture — all offline.
@@ -104,7 +106,8 @@ are missing. Cosine on L2-normalized embeddings; defaults **0.35**
 **largest / most central** (InsightFace `area − 2·offset²`).
 
 InsightFace weights are **not** MIT. Read their license before
-redistributing `det_10g` / `w600k_*`. They are not vendored.
+redistributing `det_10g` / `w600k_*`. They are **not vendored** in
+git, `.deb`, tarball, or AUR packages — download them yourself.
 
 Without a face rec model, enrollment **fails closed** unless you opt
 into the weak probe print: `BUCKYBOI_FACE_PROBE=1`. That is a crop
@@ -201,6 +204,68 @@ BUCKYBOI_FACE_SIM=1 BUCKYBOI_FACE_PROBE=1 \
 
 `BUDDY_*` names still work as aliases.
 
+## Install (packages)
+
+Crate version is **0.5.0** (`rust/Cargo.toml`). Tag `v0.5.0` (once
+pushed) builds GitHub Release assets. **ONNX models are never in the
+package.**
+
+### GitHub Release (tarball / `.deb`)
+
+On each `v*` tag, Actions builds `cargo build --release` (default
+features) and uploads:
+
+| Asset | Contents |
+| --- | --- |
+| `buckyboi-VERSION-x86_64-linux.tar.gz` | `buckyboi`, README snippet, `contrib/omarchy/hyprland.conf`, `scripts/download-models.sh` |
+| `buckyboi_VERSION_amd64.deb` | `/usr/bin/buckyboi`, man page, desktop file, `/usr/share/buckyboi/` snippet + model script |
+
+```bash
+# Debian / Ubuntu (default-features binary)
+sudo dpkg -i buckyboi_*_amd64.deb
+# runtime: libwayland-client0 libxkbcommon0; X11 fallback libs recommended
+./scripts/download-models.sh   # optional identity weights, not in the .deb
+```
+
+Identity backends (`--features face,hands,voice`) are **not** in the
+release binary. Rebuild from source if you want ONNX. Same for a custom
+`.deb`: `cargo build --release --features face,hands,voice` then
+`scripts/package-linux.sh 0.5.0 rust/target/release/buckyboi dist`.
+
+### AUR (Arch)
+
+PKGBUILDs live in-tree (not yet submitted to aur.archlinux.org):
+
+| Directory | Tracks |
+| --- | --- |
+| [`packaging/aur/buckyboi/`](packaging/aur/buckyboi/) | stable `v*` GitHub tag |
+| [`packaging/aur/buckyboi-git/`](packaging/aur/buckyboi-git/) | `main` |
+
+```bash
+# local makepkg after a v0.5.0 tag exists (stable)
+cd packaging/aur/buckyboi
+makepkg -si
+
+# or track main
+cd packaging/aur/buckyboi-git
+makepkg -si
+```
+
+Hyprland snippet installs to **`/usr/share/buckyboi/hyprland.conf`**.
+Source or merge it — the package does **not** write
+`~/.config/hypr/hyprland.conf`. Models: `/usr/share/buckyboi/download-models.sh`.
+
+With an AUR helper (after the package is published): `yay -S buckyboi`
+or `buckyboi-git`.
+
+Until the first tag, use `buckyboi-git` or `cargo install --path rust`.
+Stable `sha256sums` is `SKIP` until you run `updpkgsums` on the release
+tarball.
+
+### Flathub
+
+Not yet. See [ROADMAP.md](ROADMAP.md).
+
 ## Distro notes
 
 | Need | Debian / Ubuntu | Fedora | Arch |
@@ -258,6 +323,27 @@ interactivity is **OnDemand** so Esc works after you click the buddy.
 Multi-output: the layer is created with `output = None` (compositor
 default / focused head). Extra monitors are a follow-up.
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every
+PR and push to `main`:
+
+- `cargo test` (default features)
+- `cargo test --no-default-features`
+- `cargo test --features face,hands,voice` (needs ALSA / clang / `g++`
+  so `-lstdc++` resolves for sherpa-onnx / ort; downloads their native libs)
+- `cargo clippy` (default deny-level; the tree is not `-D warnings` clean)
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) runs
+on `v*` tags and publishes the tarball + `.deb` with
+`softprops/action-gh-release`.
+
+**Actions billing:** this repo previously failed with **no runner
+allocated / spending limit**. Workflows here are correct; jobs will
+not start (badge stays stale or failed) until the owner clears GitHub
+Actions spending under repository billing. A missing green check is
+not a compile failure.
+
 ## Tests
 
 ```bash
@@ -284,9 +370,12 @@ ARCHITECTURE.md    crate map + identity stack
 ROADMAP.md         phases and honest leftovers
 UX.md              overlay + auth + calibration flows
 SPEC.md            shared icosahedron physics
+.github/workflows  CI + tagged release assets
+packaging/linux    desktop file, man page, tarball README
+packaging/aur      PKGBUILD + .SRCINFO (stable + -git)
 contrib/omarchy/   Hyprland binds + Omarchy notes
 contrib/hyprland/  same snippet for generic Hyprland
-scripts/           model download
+scripts/           model download + linux tarball/.deb
 rust/              product crate — lib + bin buckyboi
 python/            historical pygame window
 bend/              historical Bend 2 window

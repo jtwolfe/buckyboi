@@ -55,11 +55,22 @@ calendar estimates.
 - Same `EnrollSession` machines as Settings → ID; ADD reuses the wizard.
 - Esc cancels the wizard; hide-timer pauses while it is open.
 
+## I — Packaging (this tree)
+
+- GitHub Actions CI on PRs + `main` (default / no-default / `face,hands,voice`, clippy).
+- Tagged `v*` release: Linux x86_64 tarball + `.deb` (default features).
+- In-tree AUR PKGBUILDs (`packaging/aur/buckyboi` + `buckyboi-git`).
+- **Models not included** anywhere we ship.
+
+Owner must clear GitHub Actions billing if runners were previously
+refused (spending limit). Workflows do not fix that.
+
 ## Next (not blocking)
 
 - Multi-output follow (one layer per head, or follow the focused output).
 - Fractional-scale / `wp_viewporter` so HiDPI is sharp (v1 uses logical pixels).
-- Packaged `.deb` / Flathub with a models extra.
+- **Flathub / Flatpak** later, with models as an extra (still not vendored).
+- Submit AUR packages to aur.archlinux.org once `v0.5.0` exists.
 
 ## Honest limits
 

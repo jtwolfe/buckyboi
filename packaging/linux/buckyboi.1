@@ -1,0 +1,86 @@
+.TH BUCKYBOI 1 "2026-09-20" "buckyboi" "User Commands"
+.SH NAME
+buckyboi \- Linux desktop overlay buddy (gaze, gesture, local identity)
+.SH SYNOPSIS
+.B buckyboi
+[\fB\-\-wake\fR|\fB\-\-quit\fR|\fB\-h\fR]
+.SH DESCRIPTION
+.B buckyboi
+draws a rotating wireframe icosahedron as a fullscreen transparent
+click-through overlay. On Wayland it uses wlr-layer-shell (Hyprland /
+Omarchy / other wlroots). On X11 it uses Shape + XFixes.
+.PP
+Looking at the buddy (webcam gaze) or clicking it can enter Listening
+if the local identity gate allows. Profiles and settings live under
+.I ~/.config/buckyboi/
+and never leave the machine.
+.PP
+This package ships the
+.B default-features
+binary (overlay + V4L2 gaze). Face / hands / voice ONNX backends are
+compile-time features and are
+.B not
+bundled. Model weights are
+.B not
+included; use
+.I /usr/share/buckyboi/download-models.sh
+or the script from the source tree.
+.SH COMMANDS
+.TP
+.B buckyboi
+Run the overlay (needs \fIWAYLAND_DISPLAY\fR or \fIDISPLAY\fR).
+.TP
+.B buckyboi \-\-wake
+Wake a hidden instance via \fI$XDG_RUNTIME_DIR/buckyboi.sock\fR.
+.TP
+.B buckyboi \-\-quit
+Ask a running instance to exit.
+.TP
+.B buckyboi \-h\fR, \fBbuckyboi \-\-help
+Print usage.
+.SH ENVIRONMENT
+.TP
+.B WAYLAND_DISPLAY
+Prefer native Wayland layer-shell.
+.TP
+.B DISPLAY
+X11 / XWayland fallback.
+.TP
+.B BUCKYBOI_DISPLAY
+.BR wayland ", " x11 ", or " auto .
+.TP
+.B BUCKYBOI_CAMERA
+V4L2 device (default \fI/dev/video0\fR).
+.TP
+.B BUCKYBOI_NO_CAMERA
+Skip the webcam.
+.TP
+.B BUCKYBOI_MODELS
+Directory of optional ONNX weights.
+.TP
+.B BUCKYBOI_SOCK
+Control socket (default \fI$XDG_RUNTIME_DIR/buckyboi.sock\fR).
+.PP
+\fIBUDDY_*\fR names still work as aliases. See the project README for
+the full list (\fIBUCKYBOI_LISTEN_MS\fR, \fIBUCKYBOI_FACE_SIM\fR, …).
+.SH FILES
+.TP
+.I ~/.config/buckyboi/settings.ini
+UX settings.
+.TP
+.I ~/.config/buckyboi/profiles.json
+Enrolled people and embeddings.
+.TP
+.I ~/.config/buckyboi/models/
+Optional ONNX weights (not packaged).
+.TP
+.I /usr/share/buckyboi/hyprland.conf
+Hyprland snippet. Source or merge into your config; do not replace
+.IR ~/.config/hypr/hyprland.conf .
+.SH SEE ALSO
+Project README and
+.IR contrib/omarchy/hyprland.conf .
+.SH BUGS
+Gaze is a face-in-frame proxy, not a calibrated eye tracker. Face and
+voice prints fail closed and will false-reject in bad light or noise.
+Do not use this as a lock screen.

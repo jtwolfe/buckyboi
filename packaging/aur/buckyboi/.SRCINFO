@@ -1,0 +1,26 @@
+pkgbase = buckyboi
+	pkgdesc = Linux desktop overlay buddy — gaze, gesture, and local multi-person identity
+	pkgver = 0.5.0
+	pkgrel = 1
+	url = https://github.com/jtwolfe/buckyboi
+	arch = x86_64
+	license = MIT
+	makedepends = cargo
+	makedepends = clang
+	makedepends = pkgconf
+	depends = gcc-libs
+	depends = glibc
+	depends = wayland
+	depends = libxkbcommon
+	optdepends = libx11: X11 / XWayland fallback sessions
+	optdepends = libxext: X11 Shape
+	optdepends = libxfixes: X11 click-through
+	optdepends = v4l-utils: inspect webcam devices
+	optdepends = alsa-lib: rebuild with --features voice (ALSA)
+	optdepends = pipewire: microphone for a local --features voice build
+	conflicts = buckyboi-git
+	options = !lto
+	source = buckyboi-0.5.0.tar.gz::https://github.com/jtwolfe/buckyboi/archive/refs/tags/v0.5.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = buckyboi

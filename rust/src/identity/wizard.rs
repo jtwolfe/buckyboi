@@ -244,9 +244,7 @@ impl FirstRunWizard {
         if !matches!(self.step, WizardStep::Done) {
             return WizardEvent::None;
         }
-        let first = self.first_run;
         *self = Self::open(name, false);
-        self.first_run = first && false;
         WizardEvent::Opened
     }
 
