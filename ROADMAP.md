@@ -49,9 +49,14 @@ calendar estimates.
 - Real palm + landmark ONNX when `--features hands` and models exist.
 - Vision ONNX throttled to ~12.5 Hz; Settings ID shows TOO DARK / BLURRY / …
 
+## H — First-run enroll wizard (this tree)
+
+- Empty gallery + gate ≠ off → guided overlay (name → face → voice → skippable hands).
+- Same `EnrollSession` machines as Settings → ID; ADD reuses the wizard.
+- Esc cancels the wizard; hide-timer pauses while it is open.
+
 ## Next (not blocking)
 
-- First-run wizard that opens before the first listen when gate ≠ off and nobody is enrolled.
 - Multi-output follow (one layer per head, or follow the focused output).
 - Fractional-scale / `wp_viewporter` so HiDPI is sharp (v1 uses logical pixels).
 - Packaged `.deb` / Flathub with a models extra.

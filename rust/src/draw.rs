@@ -269,7 +269,8 @@ pub fn text(
 use crate::radial::{
     camera_hit, cancel_enroll_hit, close_button, del_btn, gate_hit, icon_centers, id_btn,
     need_face_hit, new_btn, panel_rect, person_row_hit, slider_track, tab_look_hit, tab_people_hit,
-    IconId, IdentityHud, RadialMenu, Settings, SettingsPage, CLOSE_R, ICON_RADIUS, PANEL_H, PANEL_W,
+    wizard_add_hit, wizard_next_hit, wizard_skip_hit, IconId, IdentityHud, RadialMenu, Settings,
+    SettingsPage, CLOSE_R, ICON_RADIUS, PANEL_H, PANEL_W,
 };
 
 pub fn paint_icon(
@@ -429,6 +430,41 @@ pub fn paint_panel(
         250,
     );
 
+    if hud.wizard_open {
+        let title: String = hud.wizard_title.chars().take(16).collect();
+        text(buf, w, h, x + 10, y + 32, &title, 2, 0x7E, 0xE8, 0xFF, 250);
+        text(buf, w, h, x + 10, y + 64, "ENROLL", 2, 0xB0, 0xC0, 0xD0, 240);
+        let body: String = hud.wizard_body.chars().take(16).collect();
+        text(buf, w, h, x + 10, y + 92, &body, 2, 0x7E, 0xE8, 0xFF, 250);
+        fill_rect(buf, w, h, x + 10, y + 130, pw - 20, 10, 0x22, 0x2C, 0x36, 240);
+        let fill_w = ((pw - 20) as f32 * hud.wizard_progress.clamp(0.0, 1.0)) as i32;
+        fill_rect(buf, w, h, x + 10, y + 130, fill_w, 10, 0x4A, 0xC0, 0xD8, 240);
+        if !hud.face_chip.is_empty() {
+            let chip: String = hud.face_chip.chars().take(18).collect();
+            text(buf, w, h, x + 10, y + 150, &chip, 2, 0xC8, 0xD0, 0xDC, 240);
+        }
+        if hud.wizard_can_next {
+            paint_btn(
+                buf,
+                w,
+                h,
+                wizard_next_hit(px, py),
+                off_x,
+                off_y,
+                if hud.wizard_can_add { "OK" } else { "NEXT" },
+                true,
+            );
+        }
+        if hud.wizard_can_skip {
+            paint_btn(buf, w, h, wizard_skip_hit(px, py), off_x, off_y, "SKIP", false);
+        }
+        if hud.wizard_can_add {
+            paint_btn(buf, w, h, wizard_add_hit(px, py), off_x, off_y, "ADD", false);
+        }
+        let _ = (pw, ph);
+        return;
+    }
+
     paint_btn(
         buf,
         w,
@@ -457,6 +493,10 @@ pub fn paint_panel(
         fill_rect(buf, w, h, x + 10, y + 130, pw - 20, 10, 0x22, 0x2C, 0x36, 240);
         let fill_w = ((pw - 20) as f32 * hud.enroll_progress.clamp(0.0, 1.0)) as i32;
         fill_rect(buf, w, h, x + 10, y + 130, fill_w, 10, 0x4A, 0xC0, 0xD8, 240);
+        if !hud.face_chip.is_empty() {
+            let chip: String = hud.face_chip.chars().take(18).collect();
+            text(buf, w, h, x + 10, y + 148, &chip, 2, 0xC8, 0xD0, 0xDC, 240);
+        }
         paint_btn(buf, w, h, cancel_enroll_hit(px, py), off_x, off_y, "CANCEL", false);
         let _ = (pw, ph);
         return;
@@ -484,7 +524,7 @@ pub fn paint_panel(
         paint_btn(buf, w, h, id_btn(px, py, 0), off_x, off_y, "FACE", false);
         paint_btn(buf, w, h, id_btn(px, py, 1), off_x, off_y, "VOICE", false);
         paint_btn(buf, w, h, id_btn(px, py, 2), off_x, off_y, "HAND", false);
-        paint_btn(buf, w, h, new_btn(px, py), off_x, off_y, "NEW", false);
+        paint_btn(buf, w, h, new_btn(px, py), off_x, off_y, "ADD", false);
         paint_btn(buf, w, h, del_btn(px, py), off_x, off_y, "DEL", false);
         paint_btn(
             buf,
@@ -667,7 +707,7 @@ pub fn paint_listening_chrome(
             off_y,
         );
     }
-    if menu.settings_open {
+    if menu.panel_open() {
         if let Some((_, sx, sy)) = centers.iter().copied().find(|(id, _, _)| *id == IconId::Settings) {
             let (px, py, _, _) = panel_rect(sx, sy, screen_w, screen_h);
             paint_panel(buf, w, h, px, py, settings, hud, off_x, off_y);

@@ -17,7 +17,7 @@ VisibleIdle ──gaze-follow 5–15s──► Listening ──timeout──► 
 | Phase | What you see | Input |
 | --- | --- | --- |
 | `VisibleIdle` | Rotating wireframe. Soft-avoids **gaze** (or the mouse). Dwell ring. Auth chip (`ADA` / `UNKNOWN`). | Click-through except the buddy. Tap starts Listening *if the gate allows*. Drag relocates. |
-| `Listening` | Brighter wire + pulse. Radial icons. Settings: **UX** and **ID** tabs. Enrollment panel when a wizard is running. | Icons + panel in the hit region. Timer **pauses** while Settings is open. |
+| `Listening` | Brighter wire + pulse. Radial icons. Settings: **UX** and **ID** tabs. First-run / add-person wizard or Settings ID enroll panel. | Icons + panel in the hit region. Timer **pauses** while Settings **or the first-run wizard** is open. |
 | `Hidden` | Overlay unmapped (X11) or transparent + empty `set_input_region` (Wayland) | **X11:** first root-pointer move (≥ 1 px) or keymap change. **Wayland / Hyprland:** cursorpos IPC, `buckyboi --wake`, SIGUSR1, or `SUPER+B`. |
 
 Esc quits from any phase on X11 (keymap poll, no grab). On Wayland, Esc
@@ -81,6 +81,30 @@ A blocked click or gaze-lock logs `listen blocked` / `gaze-lock ignored`
 and stays in `VisibleIdle`. Gestures that start listen use the same check.
 **HANDS NEED FACE** (ID tab) requires a live face unlock before fist/palm/…
 
+## First run
+
+If **GATE ≠ OFF** and `profiles.json` has **nobody**, the overlay opens a
+guided panel on the buddy (same chrome as Settings) instead of leaving
+you stuck on `UNKNOWN` / Settings → ID:
+
+1. **Name** — default `P1` (NEXT). Rename later in `profiles.json` if you want.
+2. **FACE** — quality frames with live rejects (`NO FACE`, `TOO DARK`,
+   `TOO BLURRY`, …) and `3/8` progress. Several faces → largest / most
+   central, chip **USING LARGEST FACE**.
+3. **VOICE** — 3 utterances (`TOO SHORT` / `TOO QUIET`). Skip if no mic.
+4. **HANDS** — optional fist → palm → thumb → point → peace. Skip allowed.
+5. **Done** — if GATE is still OFF, suggest **FACE** (or **ANY** when
+   voice was saved too). Auth chip shows the name. **ADD** starts
+   another person.
+
+Esc **cancels the wizard** and leaves the overlay up (press Esc again to
+quit). Settings → **ID** → **ADD** reuses this wizard. FACE / VOICE /
+HAND on that tab still enroll one modality at a time via the same
+machines.
+
+The wizard also opens when GATE is turned on with an empty gallery, or
+on the first blocked listen / gaze-lock that needs a person.
+
 ## Calibration / enrollment
 
 Settings → **ID**:
@@ -96,7 +120,8 @@ Settings → **ID**:
    when present. No mic → `BUCKYBOI_VOICE_SIM=1` (tone) for bringing up the wizard.
 5. **HAND** — guided holds, starting at **FIST**. Use `BUCKYBOI_HAND_SIM=fist`
    (then `palm`, `thumb`, `point`, `peace`) without a camera.
-6. **DEL** removes that person. **CANCEL** aborts a running wizard.
+6. **DEL** removes that person. **CANCEL** aborts a running Settings enroll.
+7. **ADD** opens the same first-run wizard for another person.
 
 Re-enroll replaces that modality. Profiles: `~/.config/buckyboi/profiles.json`.
 
@@ -147,7 +172,8 @@ Written to `~/.config/buckyboi/settings.ini`. Env overrides still win at startup
 ## Listen timeout
 
 Default from settings / `listen_duration_ms`. `BUCKYBOI_LISTEN_MS` overrides.
-Hidden once the deadline hits **and** Settings is closed.
+Hidden once the deadline hits **and** Settings / the first-run wizard
+is closed.
 
 ## Wireframe strokes
 

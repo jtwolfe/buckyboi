@@ -8,14 +8,14 @@ use buckyboi::display::{
 use buckyboi::face_to_screen;
 use buckyboi::identity::{
     env_flag, env_flag_alias, env_or_alias, extract_face, hands, latest_look, voice,
-    VISION_INFER_MS,
+    FirstRunWizard, WizardEvent, LARGEST_FACE_CHIP, VISION_INFER_MS,
 };
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
     initial_on, load_settings, overlay_bounds, save_settings, spin, step_overlay_avoid,
-    AuthSession, BuddyUx, EnrollKind, EnrollPhase, EnrollSession, GazeLock, GazeSmoother,
-    GestureAction, GestureClass, IdentityHud, Phase, ProfileStore, RadialAction, RadialMenu,
-    Settings, SettingsPage, UxEvent, HIT_RADIUS,
+    AuthSession, BuddyUx, EnrollKind, EnrollPhase, EnrollSession, GateMode, GazeLock,
+    GazeSmoother, GestureAction, GestureClass, IdentityHud, Phase, ProfileStore, RadialAction,
+    RadialMenu, Settings, SettingsPage, UxEvent, WizardHits, HIT_RADIUS,
 };
 use std::env;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -48,14 +48,30 @@ fn hud_from(
     profiles: &ProfileStore,
     _settings: &Settings,
     enroll: &EnrollSession,
+    wizard: &FirstRunWizard,
     now: u64,
 ) -> IdentityHud {
+    let face_chip = if wizard.using_largest_face() {
+        LARGEST_FACE_CHIP.into()
+    } else if latest_look(now, 400).map(|l| l.faces).unwrap_or(0) > 1 {
+        LARGEST_FACE_CHIP.into()
+    } else {
+        String::new()
+    };
     IdentityHud {
         auth_label: auth.state.label(now),
         people: profiles.people().iter().map(|p| p.name.clone()).collect(),
         enroll_hint: enroll.hint(),
         enroll_progress: enroll.progress(),
-        enroll_active: !matches!(enroll.phase, EnrollPhase::Idle),
+        enroll_active: !matches!(enroll.phase, EnrollPhase::Idle) && !wizard.is_open(),
+        wizard_open: wizard.is_open(),
+        wizard_title: wizard.title().into(),
+        wizard_body: wizard.body(enroll),
+        wizard_progress: wizard.progress(enroll),
+        wizard_can_skip: wizard.can_skip(),
+        wizard_can_next: wizard.can_next(),
+        wizard_can_add: wizard.can_add_another(),
+        face_chip,
     }
 }
 
@@ -130,6 +146,7 @@ fn identity_tick(
     profiles: &mut ProfileStore,
     auth: &mut AuthSession,
     enroll: &mut EnrollSession,
+    wizard: &mut FirstRunWizard,
     settings: &Settings,
     last_face_ms: &mut u64,
     last_voice_ms: &mut u64,
@@ -153,6 +170,7 @@ fn identity_tick(
         if now.saturating_sub(*last_face_ms) >= VISION_INFER_MS {
             *last_face_ms = now;
             let (_q, emb) = extract_face(&frame.rgb, frame.w, frame.h);
+            wizard.note_faces(_q.faces);
             if matches!(enroll.kind, EnrollKind::Face)
                 && !matches!(
                     enroll.phase,
@@ -269,6 +287,7 @@ fn apply_identity_action(
             save_settings(settings);
         }
         RadialAction::NewPerson => {
+            // Legacy: empty row. ADD now opens the guided wizard.
             let name = profiles.next_default_name();
             let id = profiles.upsert_named(&name);
             profiles.save();
@@ -328,6 +347,160 @@ fn person_target(profiles: &mut ProfileStore, settings: &Settings) -> (String, O
     (name, Some(id))
 }
 
+fn wizard_hits(wizard: &FirstRunWizard) -> Option<WizardHits> {
+    wizard.is_open().then_some(WizardHits {
+        can_skip: wizard.can_skip(),
+        can_next: wizard.can_next(),
+        can_add: wizard.can_add_another(),
+    })
+}
+
+fn show_wizard(
+    wizard: &mut FirstRunWizard,
+    menu: &mut RadialMenu,
+    ux: &mut BuddyUx,
+    profiles: &ProfileStore,
+    settings: &Settings,
+    now: u64,
+    first_run: bool,
+) {
+    let name = profiles.next_default_name();
+    *wizard = FirstRunWizard::open(name, first_run);
+    menu.wizard_open = true;
+    menu.settings_open = true;
+    menu.freeze_ms = Some(now);
+    if ux.phase != Phase::Listening {
+        let listen_ms = listen_override_ms().unwrap_or(settings.listen_ms as u64);
+        ux.enter_listen_for(now, listen_ms);
+    }
+    eprintln!(
+        "buckyboi: {} wizard for {} — NEXT to enroll",
+        wizard.title(),
+        wizard.person_name
+    );
+}
+
+fn close_wizard_chrome(menu: &mut RadialMenu) {
+    menu.wizard_open = false;
+    menu.settings_open = false;
+    menu.freeze_ms = None;
+}
+
+fn ensure_wizard_person(
+    wizard: &mut FirstRunWizard,
+    profiles: &mut ProfileStore,
+    settings: &mut Settings,
+) {
+    if wizard.person_id.is_some() {
+        return;
+    }
+    let id = profiles.upsert_named(&wizard.person_name);
+    profiles.save();
+    wizard.person_id = Some(id.clone());
+    if let Some(i) = profiles.people().iter().position(|p| p.id == id) {
+        settings.selected_person = i;
+    }
+}
+
+fn stamp_wizard_auth(wizard: &FirstRunWizard, auth: &mut AuthSession, now: u64) {
+    let (Some(id), name) = (wizard.person_id.as_deref(), wizard.person_name.as_str()) else {
+        return;
+    };
+    if wizard.face_ok {
+        auth.note_face(id, name, now, 1.0);
+    }
+    if wizard.voice_ok {
+        auth.note_voice(id, name, now, 1.0);
+    }
+}
+
+fn apply_wizard_event(
+    ev: WizardEvent,
+    wizard: &mut FirstRunWizard,
+    enroll: &mut EnrollSession,
+    profiles: &mut ProfileStore,
+    settings: &mut Settings,
+    menu: &mut RadialMenu,
+) {
+    match ev {
+        WizardEvent::None | WizardEvent::Opened => {}
+        WizardEvent::BeginFace => {
+            ensure_wizard_person(wizard, profiles, settings);
+            *enroll = EnrollSession::start_face(
+                wizard.person_name.clone(),
+                wizard.person_id.clone(),
+            );
+            enroll.begin_capture();
+            eprintln!(
+                "buckyboi: wizard FACE — look at the camera (or BUCKYBOI_FACE_SIM=1)"
+            );
+        }
+        WizardEvent::BeginVoice => {
+            ensure_wizard_person(wizard, profiles, settings);
+            *enroll = EnrollSession::start_voice(
+                wizard.person_name.clone(),
+                wizard.person_id.clone(),
+            );
+            enroll.begin_capture();
+            eprintln!(
+                "buckyboi: wizard VOICE — speak ~1.5s × 3 or SKIP (BUCKYBOI_VOICE_SIM=1)"
+            );
+        }
+        WizardEvent::BeginHands(class) => {
+            ensure_wizard_person(wizard, profiles, settings);
+            *enroll = EnrollSession::start_gesture(
+                wizard.person_name.clone(),
+                wizard.person_id.clone(),
+                class,
+                hands::GESTURE_ENROLL_NEED,
+            );
+            enroll.begin_capture();
+            eprintln!(
+                "buckyboi: wizard HAND {} — hold or SKIP (BUCKYBOI_HAND_SIM)",
+                class.label()
+            );
+        }
+        WizardEvent::SuggestGate(g) => {
+            if settings.gate == GateMode::Off {
+                settings.gate = g;
+                save_settings(settings);
+                eprintln!("buckyboi: gate → {} (wizard suggestion)", g.label());
+            }
+            if !wizard.is_open() {
+                close_wizard_chrome(menu);
+                eprintln!("buckyboi: wizard done");
+            }
+        }
+        WizardEvent::Completed => {
+            close_wizard_chrome(menu);
+            eprintln!("buckyboi: wizard done");
+        }
+        WizardEvent::Cancelled => {
+            enroll.cancel();
+            close_wizard_chrome(menu);
+            eprintln!("buckyboi: wizard cancelled");
+        }
+    }
+}
+
+fn maybe_offer_wizard(
+    wizard: &mut FirstRunWizard,
+    menu: &mut RadialMenu,
+    ux: &mut BuddyUx,
+    profiles: &ProfileStore,
+    settings: &Settings,
+    now: u64,
+) -> bool {
+    if wizard.is_open() {
+        return false;
+    }
+    if FirstRunWizard::should_offer(settings.gate, profiles.enrolled_count()) {
+        show_wizard(wizard, menu, ux, profiles, settings, now, true);
+        return true;
+    }
+    false
+}
+
 fn maybe_gesture_action(
     now: u64,
     profiles: &ProfileStore,
@@ -377,8 +550,9 @@ fn print_help() {
          Usage: buckyboi [--wake|--quit]\n\n\
          Fullscreen overlay on Wayland (wlr-layer-shell / Hyprland / Omarchy)\n\
          or X11 (Shape + XFixes). Look at the icosahedron (or click it) to\n\
-         listen if the gate allows. Settings → ID enrolls face, voice, and\n\
-         gestures. Profiles stay in ~/.config/buckyboi/ (offline).\n\n\
+         listen if the gate allows. Empty gallery + gate on opens a first-run\n\
+         enroll wizard. Settings → ID still enrolls one modality at a time.\n\
+         Profiles stay in ~/.config/buckyboi/ (offline).\n\n\
          Commands:\n\
            buckyboi            run the overlay\n\
            buckyboi --wake     wake a hidden instance (Hyprland bind)\n\
@@ -454,6 +628,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     profiles.file.face_threshold = profiles.file.face_threshold.max(0.15);
     let mut auth = AuthSession::new(8_000);
     let mut enroll = EnrollSession::idle();
+    let mut wizard = FirstRunWizard::closed();
+    let mut wizard_declined = false;
     let mut last_hand_ms = 0u64;
     let mut last_voice_ms = 0u64;
     let mut last_face_ms = 0u64;
@@ -484,6 +660,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut prev_button = false;
+    let mut prev_escape = false;
     let mut mapped = true;
     let pad = HIT_RADIUS + 28.0;
 
@@ -513,6 +690,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let frame = Duration::from_micros(16_666);
     let mut last_hypr_refresh = Instant::now();
+    if FirstRunWizard::should_offer(settings.gate, profiles.enrolled_count()) {
+        show_wizard(
+            &mut wizard,
+            &mut menu,
+            &mut ux,
+            &profiles,
+            &settings,
+            now_ms(),
+            true,
+        );
+    }
     loop {
         let tick_start = Instant::now();
         let (nw, nh) = backend.size();
@@ -554,9 +742,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ev_press = input.ev_press;
         let ev_release = input.ev_release;
 
-        if input.escape {
-            break;
+        if input.escape && !prev_escape {
+            if wizard.is_open() {
+                wizard_declined = true;
+                let ev = wizard.cancel();
+                apply_wizard_event(
+                    ev,
+                    &mut wizard,
+                    &mut enroll,
+                    &mut profiles,
+                    &mut settings,
+                    &mut menu,
+                );
+            } else {
+                break;
+            }
         }
+        prev_escape = input.escape;
 
         let now = now_ms();
         identity_tick(
@@ -564,15 +766,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut profiles,
             &mut auth,
             &mut enroll,
+            &mut wizard,
             &settings,
             &mut last_face_ms,
             &mut last_voice_ms,
             &mut last_hand_ms,
         );
         if matches!(enroll.phase, EnrollPhase::Done { .. }) {
+            let kind = enroll.kind;
             finish_enroll(&mut enroll, &mut profiles, &mut settings);
+            if wizard.is_open() {
+                let ev = wizard.on_enroll_finished(kind);
+                apply_wizard_event(
+                    ev,
+                    &mut wizard,
+                    &mut enroll,
+                    &mut profiles,
+                    &mut settings,
+                    &mut menu,
+                );
+            }
         }
-        if matches!(enroll.phase, EnrollPhase::Idle) {
+        if matches!(enroll.phase, EnrollPhase::Idle) && !wizard.is_open() {
             if let Some(gact) =
                 maybe_gesture_action(now, &profiles, &auth, &settings, &mut last_hand_ms)
             {
@@ -668,11 +883,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match ux.button_up(mx, my, now, listen_seed()) {
                         UxEvent::StartListen => {
                             if !auth.allows_listen(settings.gate, now) {
-                                eprintln!(
-                                    "buckyboi: listen blocked (gate {} / {})",
-                                    settings.gate.label(),
-                                    auth.state.label(now)
-                                );
+                                if !wizard_declined
+                                    && maybe_offer_wizard(
+                                        &mut wizard,
+                                        &mut menu,
+                                        &mut ux,
+                                        &profiles,
+                                        &settings,
+                                        now,
+                                    )
+                                {
+                                    eprintln!("buckyboi: listen needs enroll — opening wizard");
+                                } else {
+                                    eprintln!(
+                                        "buckyboi: listen blocked (gate {} / {})",
+                                        settings.gate.label(),
+                                        auth.state.label(now)
+                                    );
+                                }
                             } else {
                                 if let Some(ms) = listen_override_ms() {
                                     ux.enter_listen_for(now, ms);
@@ -701,11 +929,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if gaze_lock.update(now, over) == UxEvent::StartListen {
                             if !auth.allows_listen(settings.gate, now) {
                                 gaze_lock.reset();
-                                eprintln!(
-                                    "buckyboi: gaze-lock ignored (gate {} / {})",
-                                    settings.gate.label(),
-                                    auth.state.label(now)
-                                );
+                                if !wizard_declined
+                                    && maybe_offer_wizard(
+                                        &mut wizard,
+                                        &mut menu,
+                                        &mut ux,
+                                        &profiles,
+                                        &settings,
+                                        now,
+                                    )
+                                {
+                                    eprintln!("buckyboi: gaze-lock needs enroll — opening wizard");
+                                } else {
+                                    eprintln!(
+                                        "buckyboi: gaze-lock ignored (gate {} / {})",
+                                        settings.gate.label(),
+                                        auth.state.label(now)
+                                    );
+                                }
                             } else {
                                 let listen_ms =
                                     listen_override_ms().unwrap_or(settings.listen_ms as u64);
@@ -743,7 +984,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         sw as f32,
                         sh as f32,
                         profiles.enrolled_count(),
-                        !matches!(enroll.phase, EnrollPhase::Idle),
+                        !matches!(enroll.phase, EnrollPhase::Idle) && !wizard.is_open(),
+                        wizard_hits(&wizard),
                     );
                     apply_identity_action(
                         act,
@@ -812,8 +1054,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             settings.page = SettingsPage::People;
                             menu.settings_open = true;
                         }
+                        RadialAction::CycleGate => {
+                            if maybe_offer_wizard(
+                                &mut wizard,
+                                &mut menu,
+                                &mut ux,
+                                &profiles,
+                                &settings,
+                                now,
+                            ) {
+                                wizard_declined = false;
+                                eprintln!("buckyboi: gate on + empty gallery — enroll wizard");
+                            }
+                        }
+                        RadialAction::OpenWizard => {
+                            wizard_declined = false;
+                            show_wizard(
+                                &mut wizard,
+                                &mut menu,
+                                &mut ux,
+                                &profiles,
+                                &settings,
+                                now,
+                                false,
+                            );
+                        }
+                        RadialAction::WizardAdvance => {
+                            stamp_wizard_auth(&wizard, &mut auth, now);
+                            let ev = wizard.advance();
+                            apply_wizard_event(
+                                ev,
+                                &mut wizard,
+                                &mut enroll,
+                                &mut profiles,
+                                &mut settings,
+                                &mut menu,
+                            );
+                        }
+                        RadialAction::WizardSkip => {
+                            enroll.cancel();
+                            let ev = wizard.skip();
+                            apply_wizard_event(
+                                ev,
+                                &mut wizard,
+                                &mut enroll,
+                                &mut profiles,
+                                &mut settings,
+                                &mut menu,
+                            );
+                        }
+                        RadialAction::WizardCancel => {
+                            wizard_declined = true;
+                            let ev = wizard.cancel();
+                            apply_wizard_event(
+                                ev,
+                                &mut wizard,
+                                &mut enroll,
+                                &mut profiles,
+                                &mut settings,
+                                &mut menu,
+                            );
+                        }
+                        RadialAction::WizardAddAnother => {
+                            let name = profiles.next_default_name();
+                            enroll.cancel();
+                            let ev = wizard.add_another(name);
+                            apply_wizard_event(
+                                ev,
+                                &mut wizard,
+                                &mut enroll,
+                                &mut profiles,
+                                &mut settings,
+                                &mut menu,
+                            );
+                        }
                         RadialAction::None
-                        | RadialAction::CycleGate
                         | RadialAction::ToggleNeedFace
                         | RadialAction::TabLook
                         | RadialAction::TabPeople
@@ -823,7 +1138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         | RadialAction::CancelEnroll => {}
                     }
                 }
-                if !menu.settings_open && ux.tick(now) == UxEvent::Hide {
+                if !menu.panel_open() && ux.tick(now) == UxEvent::Hide {
                     ux.phase = Phase::Hidden;
                 }
                 if ux.phase == Phase::Hidden {
@@ -856,7 +1171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 0.0
             };
-            let hud = hud_from(&auth, &profiles, &settings, &enroll, now);
+            let hud = hud_from(&auth, &profiles, &settings, &enroll, &wizard, now);
             let pixels = paint_rect(
                 &state, listening, pulse, dwell, &menu, &settings, &hud, mx, my, now, sw as f32,
                 sh as f32, rect,

@@ -45,7 +45,7 @@ for the stack, [SPEC.md](SPEC.md) for icosahedron physics.
    tabs: **UX** (camera / gate / listen / gaze / stroke) and **ID**
    (people, enroll face / voice / gestures, delete).
 5. After a random **5–15 s** of Listening it **hides**. The timer pauses
-   while Settings is open.
+   while Settings or the first-run enroll wizard is open.
 6. While hidden, the first **mouse movement or key press** brings it back
    (X11). On Wayland / Hyprland: mouse via compositor IPC, or `SUPER+B`
    / `buckyboi --wake`.
@@ -115,14 +115,23 @@ ERes2Net file is in the models dir (threshold **≈ 0.60**; enroll **3**
 utterances ≥ 1.2 s). `BUCKYBOI_MODELS_ZH=1` also pulls the ZH net.
 Log-mel is fallback only.
 
+## First run
+
+When **GATE ≠ OFF** and nobody is in `profiles.json`, a guided overlay
+wizard opens on the buddy (Omarchy / day-one). Face first (live
+`NO FACE` / `TOO DARK` / `TOO BLURRY` + `3/8`), then voice (skippable),
+then optional hands. Esc cancels the wizard without quitting. **ADD**
+on Settings → ID reuses it. If GATE is still OFF at Done, it suggests
+FACE or ANY.
+
 ## Enrollment / calibration
 
 Open Listening → Settings → **ID**:
 
 | Control | Action |
 | --- | --- |
-| **NEW** | create a person (`P1`, `P2`, …) |
-| select a row | who the next enroll applies to |
+| **ADD** | first-run wizard for a new person (`P1`, `P2`, …) |
+| select a row | who the next single-modality enroll applies to |
 | **FACE** | capture 8 quality-checked frames |
 | **VOICE** | capture 3 utterances ≥ 1.2 s |
 | **HAND** | guided holds starting at FIST (then palm, thumb, point, peace) |
@@ -259,7 +268,7 @@ cargo test --manifest-path rust/Cargo.toml --no-default-features
 Headless: vertex/edge math, lock/clamp, overlay avoid, tap vs drag,
 listen timeout, gaze lock, face-blob + iris, radial hits, stroke
 occlusion, **cosine match / fail-closed**, **gate state machine**,
-**enroll wizards**, **5-point align math**, **SCRFD decode**,
+**enroll machines**, **first-run wizard FSM**, **5-point align math**, **SCRFD decode**,
 **log-mel + speaker-path pick**, **gesture rules + centroids**.
 
 ```bash

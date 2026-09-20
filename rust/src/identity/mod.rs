@@ -13,6 +13,7 @@ pub mod palm;
 pub mod persist;
 pub mod scrfd;
 pub mod voice;
+pub mod wizard;
 
 pub use embed::*;
 pub use enroll::*;
@@ -26,6 +27,7 @@ pub use hands::{
     GestureAction, GestureClass, GestureMap, GestureSample, HandLandmarks, DEFAULT_GESTURE_MAP,
 };
 pub use persist::*;
+pub use wizard::{FirstRunWizard, WizardEvent, WizardStep, LARGEST_FACE_CHIP};
 pub use voice::{
     logmel_embed, pick_speaker_model, speech_energy, voice_cosine_threshold, VoiceQuality,
     VoiceReject, VOICE_ENROLL_NEED, VOICE_MIN_MS, VOICE_THRESHOLD_SHERPA,

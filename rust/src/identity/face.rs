@@ -84,6 +84,7 @@ pub struct FaceLook {
     pub fh: f32,
     pub t_ms: u64,
     pub from_scrfd: bool,
+    pub faces: u32,
 }
 
 static LAST_LOOK: OnceLock<Mutex<Option<FaceLook>>> = OnceLock::new();
@@ -309,21 +310,38 @@ fn crop_for_quality(rgb: &[u8], w: u32, h: u32, face: &DetectedFace) -> (Vec<u8>
     )
 }
 
-/// Skin-blob / SCRFD box + quality gates. Used by enroll and tests.
-pub fn assess_face_rgb(rgb: &[u8], w: u32, h: u32) -> (FaceQuality, Option<FaceBox>) {
-    let Some(face) = detect_primary(rgb, w, h) else {
-        return (FaceQuality::reject(FaceReject::NoFace), None);
-    };
-    let (crop, _aligned) = crop_for_quality(rgb, w, h, &face);
-    let q = quality_from_crop(&crop, face.bbox, w, h, 1);
+fn detect_counted(rgb: &[u8], w: u32, h: u32) -> (u32, Option<DetectedFace>) {
+    let faces = detect_faces(rgb, w, h);
+    let n = faces.len() as u32;
+    (n, pick_primary_face(&faces, w as f32, h as f32))
+}
+
+fn publish_primary(face: &DetectedFace, w: u32, h: u32, faces: u32, from_scrfd: bool) {
     publish_look(FaceLook {
         cx: face.cx(),
         cy: face.cy(),
         fw: w as f32,
         fh: h as f32,
         t_ms: now_ms_soft(),
-        from_scrfd: face.kps.is_some() || face.score >= SCRFD_DET_THRESH,
+        from_scrfd,
+        faces,
     });
+}
+
+/// Skin-blob / SCRFD box + quality gates. Used by enroll and tests.
+pub fn assess_face_rgb(rgb: &[u8], w: u32, h: u32) -> (FaceQuality, Option<FaceBox>) {
+    let (n, Some(face)) = detect_counted(rgb, w, h) else {
+        return (FaceQuality::reject(FaceReject::NoFace), None);
+    };
+    let (crop, _aligned) = crop_for_quality(rgb, w, h, &face);
+    let q = quality_from_crop(&crop, face.bbox, w, h, n);
+    publish_primary(
+        &face,
+        w,
+        h,
+        n,
+        face.kps.is_some() || face.score >= SCRFD_DET_THRESH,
+    );
     (q, Some(face.bbox))
 }
 
@@ -345,19 +363,12 @@ pub fn probe_embed(rgb: &[u8], w: u32, h: u32, bbox: FaceBox) -> Embedding {
 
 /// Extract an embedding. Prefers detect → align → ArcFace when models exist.
 pub fn extract_embedding(rgb: &[u8], w: u32, h: u32) -> (FaceQuality, Option<Embedding>) {
-    let Some(face) = detect_primary(rgb, w, h) else {
+    let (n, Some(face)) = detect_counted(rgb, w, h) else {
         return (FaceQuality::reject(FaceReject::NoFace), None);
     };
     let (crop, aligned) = crop_for_quality(rgb, w, h, &face);
-    let mut q = quality_from_crop(&crop, face.bbox, w, h, 1);
-    publish_look(FaceLook {
-        cx: face.cx(),
-        cy: face.cy(),
-        fw: w as f32,
-        fh: h as f32,
-        t_ms: now_ms_soft(),
-        from_scrfd: face.kps.is_some(),
-    });
+    let mut q = quality_from_crop(&crop, face.bbox, w, h, n);
+    publish_primary(&face, w, h, n, face.kps.is_some());
     if !q.ok {
         return (q, None);
     }
