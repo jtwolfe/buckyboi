@@ -5,7 +5,6 @@ use crate::identity::enroll::EnrollKind;
 use crate::identity::face::FaceQuality;
 use crate::identity::hands::HandStatus;
 use crate::identity::voice::VoiceQuality;
-#[cfg(any(test, feature = "face", feature = "hands", feature = "voice"))]
 use crate::identity::VISION_INFER_MS;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -278,9 +277,18 @@ fn hand_status(frame: Option<&crate::camera::CamFrame>) -> HandStatus {
     crate::identity::hands::extract_status(&frame.rgb, frame.w, frame.h)
 }
 
-#[cfg(feature = "voice")]
-fn take_voice_samples() -> Vec<f32> {
-    crate::identity::voice::worker_samples()
+/// Remainder of the vis cadence, or 0 when voice is due and this slice blew the 40 ms budget
+/// so the next loop skips vision and can embed.
+#[cfg_attr(
+    not(any(feature = "face", feature = "hands", feature = "voice")),
+    allow(dead_code)
+)]
+fn vis_sleep_ms(spent_ms: u64, defer_voice: bool) -> u64 {
+    if defer_voice {
+        0
+    } else {
+        VISION_INFER_MS.saturating_sub(spent_ms)
+    }
 }
 
 #[cfg(any(feature = "face", feature = "hands", feature = "voice"))]
@@ -355,7 +363,10 @@ fn vision_loop() {
             }
         }
 
-        // Voice cadence is separate; skip if this vision slice already spent ≥ 40 ms.
+        // Voice cadence is separate. If due but this slice already spent ≥ 40 ms,
+        // do not stamp last_voice_ms and sleep 0 so the next loop skips vision.
+        #[cfg_attr(not(feature = "voice"), allow(unused_mut))]
+        let mut defer_voice = false;
         #[cfg(feature = "voice")]
         {
             let period = if ENROLLING_VOICE.load(Ordering::Relaxed) {
@@ -363,24 +374,28 @@ fn vision_loop() {
             } else {
                 2_400
             };
-            if now.saturating_sub(last_voice_ms) >= period && t0.elapsed().as_millis() < 40 {
-                last_voice_ms = now;
-                let samples = take_voice_samples();
-                let (quality, embedding) = crate::identity::voice::extract_embedding(
-                    &samples,
-                    crate::identity::voice::VOICE_SAMPLE_RATE,
-                );
-                publish_voice(VoiceSnap {
-                    t_ms: now,
-                    quality,
-                    embedding,
-                });
+            if now.saturating_sub(last_voice_ms) >= period {
+                if t0.elapsed().as_millis() < 40 {
+                    last_voice_ms = now;
+                    let samples = crate::identity::voice::worker_samples();
+                    let (quality, embedding) = crate::identity::voice::extract_embedding(
+                        &samples,
+                        crate::identity::voice::VOICE_SAMPLE_RATE,
+                    );
+                    publish_voice(VoiceSnap {
+                        t_ms: now,
+                        quality,
+                        embedding,
+                    });
+                } else {
+                    defer_voice = true;
+                }
             }
         }
 
         last_pub_ms = now_ms();
         let spent = t0.elapsed().as_millis() as u64;
-        let rest = VISION_INFER_MS.saturating_sub(spent);
+        let rest = vis_sleep_ms(spent, defer_voice);
         if rest > 0 {
             std::thread::sleep(Duration::from_millis(rest));
         }
@@ -391,6 +406,14 @@ fn vision_loop() {
 mod tests {
     use super::*;
     use crate::identity::face::FaceReject;
+
+    #[test]
+    fn vis_sleep_zero_when_voice_deferred() {
+        assert_eq!(vis_sleep_ms(50, true), 0);
+        assert_eq!(vis_sleep_ms(50, false), VISION_INFER_MS - 50);
+        assert_eq!(vis_sleep_ms(90, false), 0);
+        assert_eq!(vis_sleep_ms(0, true), 0);
+    }
 
     #[test]
     fn stamp_if_due_stamps_before_miss() {

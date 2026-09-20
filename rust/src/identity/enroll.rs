@@ -179,9 +179,11 @@ impl EnrollSession {
     }
 
     pub fn fail_now(&mut self, reason: impl Into<String>) {
-        self.phase = EnrollPhase::Failed {
-            reason: reason.into(),
-        };
+        let reason = reason.into();
+        if !matches!(&self.phase, EnrollPhase::Failed { reason: r } if r == &reason) {
+            eprintln!("buckyboi: enroll failed ({reason})");
+        }
+        self.phase = EnrollPhase::Failed { reason };
     }
 
     pub fn note_reject(&mut self, hint: impl Into<String>) {

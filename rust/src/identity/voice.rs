@@ -452,8 +452,12 @@ mod sherpa {
 
     static EXTRACTOR: Mutex<Option<sherpa_onnx::SpeakerEmbeddingExtractor>> = Mutex::new(None);
     static TRIED: AtomicBool = AtomicBool::new(false);
+    #[cfg(test)]
+    static CREATE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     fn create_extractor() -> Option<sherpa_onnx::SpeakerEmbeddingExtractor> {
+        #[cfg(test)]
+        CREATE_CALLS.fetch_add(1, Ordering::SeqCst);
         let dir = models_dir()?;
         let model = pick_speaker_model(&dir)?;
         let model = model.to_string_lossy().into_owned();
@@ -464,6 +468,20 @@ mod sherpa {
             provider: Some("cpu".into()),
         };
         sherpa_onnx::SpeakerEmbeddingExtractor::create(&cfg)
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_calls() -> usize {
+        CREATE_CALLS.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_cache_for_test() {
+        TRIED.store(false, Ordering::SeqCst);
+        CREATE_CALLS.store(0, Ordering::SeqCst);
+        if let Ok(mut g) = EXTRACTOR.lock() {
+            *g = None;
+        }
     }
 
     fn extractor(
@@ -585,42 +603,28 @@ mod tests {
         assert_eq!(empty.reject, VoiceReject::TooShort);
     }
 
-    /// First `create` wins; a later call is a no-op even if the first returned None.
-    fn init_once<T>(slot: &mut Option<T>, tried: &mut bool, create: impl FnOnce() -> Option<T>) {
-        if *tried {
-            return;
-        }
-        *tried = true;
-        *slot = create();
-    }
-
+    #[cfg(any(feature = "voice", feature = "voice-sherpa"))]
     #[test]
-    fn cached_extractor_second_call_skips_create() {
-        let mut slot: Option<i32> = None;
-        let mut tried = false;
-        let mut creates = 0;
-        init_once(&mut slot, &mut tried, || {
-            creates += 1;
-            None
+    fn cached_extractor_second_embed_skips_create() {
+        let dir = std::env::temp_dir().join(format!(
+            "buckyboi-voice-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = tone(220.0, 1600, 0.2);
+        crate::identity::with_models_dir(&dir, || {
+            sherpa::reset_cache_for_test();
+            let (q1, _) = extract_embedding(&s, 16_000);
+            assert!(q1.ok, "{q1:?}");
+            assert_eq!(sherpa::create_calls(), 1);
+            let (q2, _) = extract_embedding(&s, 16_000);
+            assert!(q2.ok, "{q2:?}");
+            assert_eq!(sherpa::create_calls(), 1, "second embed must not create()");
         });
-        init_once(&mut slot, &mut tried, || {
-            creates += 1;
-            Some(9)
-        });
-        assert_eq!(creates, 1, "already-tried must not call create");
-        assert!(slot.is_none());
-        let mut filled: Option<i32> = None;
-        let mut tried2 = false;
-        creates = 0;
-        init_once(&mut filled, &mut tried2, || {
-            creates += 1;
-            Some(7)
-        });
-        init_once(&mut filled, &mut tried2, || {
-            creates += 1;
-            Some(8)
-        });
-        assert_eq!(creates, 1);
-        assert_eq!(filled, Some(7));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

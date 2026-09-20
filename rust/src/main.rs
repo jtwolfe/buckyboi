@@ -10,7 +10,7 @@ use buckyboi::identity::{
     env_flag, env_flag_alias, env_or_alias, hands, latest_face, latest_hand, latest_look,
     latest_voice, reload_rec, set_enrolling, set_gallery_kinds, set_screen, start_mic,
     start_vision_worker, voice, watch_vision_worker, wizard_auto_skip, FirstRunWizard, HandStatus,
-    VoiceQuality, VoiceReject, WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
+    WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
 };
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
@@ -212,15 +212,6 @@ fn identity_tick(
                 }
             }
         }
-    } else if enroll_capturing(enroll, EnrollKind::Voice) && !voice::input_available() {
-        // Fail-closed without ONNX when StartEnroll raced the worker.
-        let q = VoiceQuality {
-            duration_ms: 0,
-            energy: 0.0,
-            ok: false,
-            reject: VoiceReject::NoMic,
-        };
-        let _ = enroll.push_voice(q, None);
     }
 
     if enroll_capturing(enroll, EnrollKind::Voice) && enroll.timed_out(now, VOICE_ENROLL_TIMEOUT_MS)
@@ -487,15 +478,12 @@ fn settle_enroll(
         if let EnrollPhase::Failed { reason } = &enroll.phase {
             let reason = reason.clone();
             let kind = enroll.kind;
-            eprintln!("buckyboi: enroll failed ({reason})");
             if wizard.is_open() && wizard_auto_skip(kind, &reason) {
                 *enroll = EnrollSession::idle();
                 apply_wizard_event(wizard.skip(), wizard, enroll, profiles, settings, menu, now);
                 continue;
             }
-            if !wizard.is_open() {
-                *enroll = EnrollSession::idle();
-            }
+            // Leave Failed so the HUD can show NO MIC / TIMEOUT / NO FACE.
         }
         break;
     }
