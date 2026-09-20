@@ -21,8 +21,10 @@ pub mod worker;
 pub use embed::*;
 pub use enroll::*;
 pub use face::{
-    assess_face_rgb, extract_embedding as extract_face, latest_look, FaceQuality, FaceReject,
-    FACE_ENROLL_NEED, FACE_KIND_ARCFACE, FACE_KIND_PROBE, FACE_THRESHOLD_MBF, FACE_THRESHOLD_R50,
+    assess_face_rgb, extract_embedding as extract_face, latest_look, reload_rec, select_rec_model,
+    set_gallery_kinds, FaceQuality, FaceReject, FACE_ENROLL_NEED, FACE_KIND_ARCFACE,
+    FACE_KIND_ARCFACE_MBF, FACE_KIND_ARCFACE_R50, FACE_KIND_PROBE, FACE_THRESHOLD_MBF,
+    FACE_THRESHOLD_R50,
 };
 pub use gate::*;
 pub use hands::{

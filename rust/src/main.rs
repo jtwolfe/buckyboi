@@ -614,6 +614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => GazeLock::with_need(settings.gaze_lock_ms),
     };
     let mut profiles = ProfileStore::load();
+    buckyboi::identity::face::set_gallery_kinds(&profiles.face_kinds());
     profiles.file.face_threshold = profiles.file.face_threshold.max(0.15);
     start_vision_worker(&profiles.face_kinds());
     set_screen(sw as u32, sh as u32);

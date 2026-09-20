@@ -2,10 +2,10 @@
 
 use crate::identity::config_dir;
 use crate::identity::embed::{
-    best_match, Embedding, MatchHit, DEFAULT_FACE_THRESHOLD, DEFAULT_GESTURE_THRESHOLD,
-    DEFAULT_VOICE_THRESHOLD,
+    best_match, best_match_if, Embedding, MatchHit, DEFAULT_FACE_THRESHOLD,
+    DEFAULT_GESTURE_THRESHOLD, DEFAULT_VOICE_THRESHOLD,
 };
-use crate::identity::face::{FACE_KIND_ARCFACE, FACE_KIND_PROBE};
+use crate::identity::face::{FACE_KIND_ARCFACE, FACE_KIND_ARCFACE_R50};
 use crate::identity::gate::GateMode;
 use crate::identity::hands::{
     gesture_centroid, GestureAction, GestureClass, GestureMap, DEFAULT_GESTURE_MAP,
@@ -273,6 +273,18 @@ impl ProfileStore {
         }
     }
 
+    pub fn face_kinds(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for p in &self.file.people {
+            for e in &p.face {
+                if !out.iter().any(|k| k == &e.kind) {
+                    out.push(e.kind.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn match_face(&self, probe: &Embedding) -> Option<MatchHit> {
         let gal: Vec<_> = self
             .file
@@ -285,7 +297,7 @@ impl ProfileStore {
             self.file.face_threshold,
             model.as_deref(),
         );
-        best_match(probe, &gal, thresh)
+        best_match_if(probe, &gal, thresh, face_kinds_compatible)
     }
 
     pub fn match_voice(&self, probe: &Embedding) -> Option<MatchHit> {
@@ -391,9 +403,11 @@ pub fn identity_ini_lines(s: &IdentitySettings) -> String {
 }
 
 pub fn face_kinds_compatible(a: &str, b: &str) -> bool {
-    a == b
-        || (a == FACE_KIND_ARCFACE && b == FACE_KIND_ARCFACE)
-        || (a == FACE_KIND_PROBE && b == FACE_KIND_PROBE)
+    a == b || (is_r50_family(a) && is_r50_family(b))
+}
+
+fn is_r50_family(k: &str) -> bool {
+    k == FACE_KIND_ARCFACE || k == FACE_KIND_ARCFACE_R50
 }
 
 #[cfg(test)]
@@ -453,6 +467,52 @@ mod tests {
         );
         assert_eq!(store.face_kinds(), vec!["arcface".to_string()]);
         assert!(ProfileStore::empty().face_kinds().is_empty());
+    }
+
+    #[test]
+    fn match_face_mbf_does_not_hit_arcface_gallery() {
+        let mut store = ProfileStore::empty();
+        let a = store.upsert_named("Ada");
+        store.add_face(&a, vec![Embedding::new("arcface", vec![1.0, 0.0])]);
+        assert!(store
+            .match_face(&Embedding::new("arcface-mbf", vec![1.0, 0.0]))
+            .is_none());
+        store.add_face(&a, vec![Embedding::new("arcface-mbf", vec![0.0, 1.0])]);
+        let hit = store
+            .match_face(&Embedding::new("arcface-mbf", vec![0.02, 0.99]))
+            .unwrap();
+        assert_eq!(hit.name, "Ada");
+    }
+
+    #[test]
+    fn match_face_arcface_hits_arcface_gallery() {
+        let mut store = ProfileStore::empty();
+        let a = store.upsert_named("Ada");
+        store.add_face(&a, vec![Embedding::new("arcface", vec![1.0, 0.0])]);
+        let hit = store
+            .match_face(&Embedding::new("arcface", vec![0.99, 0.02]))
+            .unwrap();
+        assert_eq!(hit.name, "Ada");
+    }
+
+    #[test]
+    fn match_face_r50_alias_hits_arcface_gallery() {
+        let mut store = ProfileStore::empty();
+        let a = store.upsert_named("Ada");
+        store.add_face(&a, vec![Embedding::new("arcface", vec![1.0, 0.0])]);
+        let hit = store
+            .match_face(&Embedding::new("arcface-r50", vec![0.99, 0.02]))
+            .unwrap();
+        assert_eq!(hit.name, "Ada");
+        assert!(face_kinds_compatible("arcface", "arcface-r50"));
+        assert!(face_kinds_compatible("arcface-r50", "arcface"));
+        assert!(!face_kinds_compatible("arcface", "arcface-mbf"));
+        assert!(face_kinds_compatible("arcface-mbf", "arcface-mbf"));
+        assert!(face_kinds_compatible(
+            crate::identity::face::FACE_KIND_PROBE,
+            crate::identity::face::FACE_KIND_PROBE
+        ));
+        assert_eq!(store.face_kinds(), vec!["arcface".to_string()]);
     }
 
     #[test]

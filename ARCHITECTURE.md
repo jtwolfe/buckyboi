@@ -57,8 +57,13 @@ or a microphone.
    Laplacian variance ≥ 12. Settings ID shows **NO FACE / TOO DARK /
    TOO BLURRY / TOO SMALL / TOO CLOSE / NO MODEL**.
 4. Embed:
-   - ArcFace `w600k_r50.onnx` / `w600k_mbf.onnx` → 512-d (`kind=arcface`),
-     BGR `(x-127.5)/128`. Cosine defaults **0.35** (R50) / **0.40** (MBF).
+   - ArcFace `w600k_r50.onnx` → 512-d (`kind=arcface`); `w600k_mbf.onnx`
+     → 512-d (`kind=arcface-mbf`). BGR `(x-127.5)/128`. Cosine defaults
+     **0.35** (R50) / **0.40** (MBF). Empty / already-mbf galleries pick
+     mbf; a gallery with `arcface` / `arcface-r50` vectors keeps r50.
+     `match_face` uses `face_kinds_compatible` so `{arcface, arcface-r50}`
+     hit each other; mbf is fail-closed vs r50. `cosine()` stays strict.
+     `BUCKYBOI_FACE_REC=mbf|r50|/path` overrides the pick.
    - else `BUCKYBOI_FACE_PROBE=1` → 32-d crop histogram (`kind=face-probe`).
      Prototype only — opt-in and weak.
    - else **no embedding** (fail closed).
