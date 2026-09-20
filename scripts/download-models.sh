@@ -13,6 +13,7 @@
 # Env:
 #   BUCKYBOI_MODELS_ZH=1   also fetch the Chinese ERes2Net speaker net
 #   BUCKYBOI_SKIP_HANDS=1  skip palm / landmark (they are optional)
+#   BUCKYBOI_FACE_R50=1    also fetch w600k_r50.onnx (~174MB). Default rec is mbf.
 
 set -euo pipefail
 
@@ -49,12 +50,19 @@ echo "Models → $DEST"
 echo
 echo "Face — InsightFace buffalo (SCRFD det_10g + ArcFace). License: InsightFace."
 echo "  Pipeline: SCRFD landmarks → 5-point norm_crop 112×112 → ArcFace."
+echo "  Default rec net is MobileFaceNet (w600k_mbf). Existing kind=arcface"
+echo "  galleries keep r50. BUCKYBOI_FACE_R50=1 also fetches w600k_r50 (~174MB)."
 hf "public-data/insightface" "models/buffalo_l/det_10g.onnx" "det_10g.onnx" || \
   echo "warn: det_10g.onnx missing — gaze/ID fall back to the skin blob (no align)"
-hf "public-data/insightface" "models/buffalo_l/w600k_r50.onnx" "w600k_r50.onnx" || \
-  echo "warn: w600k_r50.onnx (~174MB) missing — trying mobilefacenet"
 hf "public-data/insightface" "models/buffalo_sc/w600k_mbf.onnx" "w600k_mbf.onnx" || \
+  echo "warn: w600k_mbf.onnx missing — trying r50"
+if [[ "${BUCKYBOI_FACE_R50:-0}" != "0" ]] || [[ ! -f "$DEST/w600k_mbf.onnx" ]]; then
+  hf "public-data/insightface" "models/buffalo_l/w600k_r50.onnx" "w600k_r50.onnx" || \
+    echo "warn: w600k_r50.onnx (~174MB) missing"
+fi
+if [[ ! -f "$DEST/w600k_mbf.onnx" ]] && [[ ! -f "$DEST/w600k_r50.onnx" ]]; then
   echo "warn: no ArcFace rec net — face ID fails closed unless BUCKYBOI_FACE_PROBE=1"
+fi
 
 echo
 echo "Speaker — English 3D-Speaker via sherpa-onnx (default). Log-mel is fallback."
@@ -93,7 +101,9 @@ echo "Done. Point the overlay at this directory with BUCKYBOI_MODELS=$DEST"
 echo "Build: cargo run --release --features face,hands,voice"
 echo
 echo "Thresholds (cosine, L2-normalized; override in profiles.json or env):"
-echo "  face  w600k_r50 ≈ 0.35   w600k_mbf ≈ 0.40   (BUCKYBOI_FACE_THRESHOLD)"
+echo "  face  w600k_mbf ≈ 0.40   w600k_r50 ≈ 0.35   (BUCKYBOI_FACE_THRESHOLD)"
+echo "  rec   empty/mbf gallery → mbf; kind=arcface gallery → r50"
+echo "        override: BUCKYBOI_FACE_REC=mbf|r50|/path"
 echo "  voice sherpa ≈ 0.60      log-mel ≈ 0.62     (BUCKYBOI_VOICE_THRESHOLD)"
 echo "  enroll voice: 3 utterances ≥ 1.2 s"
 echo "Without models, face ID fails closed unless BUCKYBOI_FACE_PROBE=1 (weak histogram)."

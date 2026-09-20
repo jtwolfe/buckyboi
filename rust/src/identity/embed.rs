@@ -35,18 +35,20 @@ pub fn l2_normalize(v: &[f32]) -> Vec<f32> {
     v.iter().map(|x| x / n).collect()
 }
 
-/// Cosine similarity in [-1, 1]. Different kinds or empty → None (fail closed).
-pub fn cosine(a: &Embedding, b: &Embedding) -> Option<f32> {
-    if a.kind != b.kind || a.values.is_empty() || a.values.len() != b.values.len() {
+fn cosine_values(a: &[f32], b: &[f32]) -> Option<f32> {
+    if a.is_empty() || a.len() != b.len() {
         return None;
     }
-    let dot = a
-        .values
-        .iter()
-        .zip(b.values.iter())
-        .map(|(x, y)| x * y)
-        .sum::<f32>();
+    let dot = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>();
     Some(dot.clamp(-1.0, 1.0))
+}
+
+/// Cosine similarity in [-1, 1]. Different kinds or empty → None (fail closed).
+pub fn cosine(a: &Embedding, b: &Embedding) -> Option<f32> {
+    if a.kind != b.kind {
+        return None;
+    }
+    cosine_values(&a.values, &b.values)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,10 +59,22 @@ pub struct MatchHit {
 }
 
 /// Highest cosine among stored vectors, if it clears `threshold`. Ties: first person.
+/// Kind must match exactly (voice / gesture). Face matching uses `best_match_if`.
 pub fn best_match(
     probe: &Embedding,
     gallery: &[(String, String, Vec<Embedding>)],
     threshold: f32,
+) -> Option<MatchHit> {
+    best_match_if(probe, gallery, threshold, |a, b| a == b)
+}
+
+/// Like `best_match`, but `kinds_ok` decides whether two kinds may be compared.
+/// Vector cosine still requires matching dimensionality; `cosine()` itself stays strict.
+pub fn best_match_if(
+    probe: &Embedding,
+    gallery: &[(String, String, Vec<Embedding>)],
+    threshold: f32,
+    kinds_ok: fn(&str, &str) -> bool,
 ) -> Option<MatchHit> {
     if !(0.0..=1.0).contains(&threshold) {
         return None;
@@ -68,7 +82,10 @@ pub fn best_match(
     let mut best: Option<MatchHit> = None;
     for (id, name, vecs) in gallery {
         for emb in vecs {
-            let Some(score) = cosine(probe, emb) else {
+            if !kinds_ok(&probe.kind, &emb.kind) {
+                continue;
+            }
+            let Some(score) = cosine_values(&probe.values, &emb.values) else {
                 continue;
             };
             if score < threshold {
@@ -131,6 +148,34 @@ mod tests {
         let a = e("arcface", vec![1.0, 0.0]);
         let b = e("logmel", vec![1.0, 0.0]);
         assert!(cosine(&a, &b).is_none());
+    }
+
+    #[test]
+    fn cosine_stays_strict_for_r50_alias() {
+        let a = e("arcface", vec![1.0, 0.0]);
+        let b = e("arcface-r50", vec![1.0, 0.0]);
+        assert!(cosine(&a, &b).is_none());
+        let mbf = e("arcface-mbf", vec![1.0, 0.0]);
+        assert!(cosine(&a, &mbf).is_none());
+    }
+
+    #[test]
+    fn best_match_if_compares_compatible_kinds() {
+        let probe = e("arcface-r50", vec![1.0, 0.0]);
+        let gal = vec![(
+            "p1".into(),
+            "Ada".into(),
+            vec![e("arcface", vec![1.0, 0.0])],
+        )];
+        assert!(best_match(&probe, &gal, 0.5).is_none());
+        let hit = best_match_if(&probe, &gal, 0.5, |a, b| {
+            a == b
+                || ((a == "arcface" || a == "arcface-r50")
+                    && (b == "arcface" || b == "arcface-r50"))
+        })
+        .unwrap();
+        assert_eq!(hit.person_id, "p1");
+        assert!(hit.score > 0.99);
     }
 
     #[test]

@@ -13,11 +13,32 @@ use crate::identity::embed::Embedding;
 use crate::identity::scrfd::{detect_onnx, pick_primary_face, DetectedFace, SCRFD_DET_THRESH};
 
 pub use crate::identity::scrfd::FaceBox;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, Once, OnceLock};
 
 pub const FACE_ENROLL_NEED: usize = 8;
 pub const FACE_KIND_ARCFACE: &str = "arcface";
+pub const FACE_KIND_ARCFACE_R50: &str = "arcface-r50";
+pub const FACE_KIND_ARCFACE_MBF: &str = "arcface-mbf";
 pub const FACE_KIND_PROBE: &str = "face-probe";
+
+/// Stored gallery kinds. Rec session waits until this is `Some`.
+static GALLERY_KINDS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// Record stored face kinds so the rec net is not committed until profiles are known.
+pub fn set_gallery_kinds(kinds: &[String]) {
+    if let Ok(mut g) = GALLERY_KINDS.lock() {
+        *g = Some(kinds.to_vec());
+    }
+}
+
+/// Drop the rec session so the next embed recommits after kinds / override change.
+pub fn reload_rec() {
+    #[cfg(feature = "face")]
+    {
+        onnx::drop_session();
+    }
+}
 
 /// Cosine on L2-normalized embeddings. InsightFace-style working points
 /// for the buffalo recognition nets (tune via `face_threshold` / env).
@@ -131,15 +152,82 @@ pub fn face_cosine_threshold(model_name: &str) -> f32 {
 
 pub fn rec_model_names() -> &'static [&'static str] {
     &[
-        "w600k_r50.onnx",
         "w600k_mbf.onnx",
-        "arcface.onnx",
         "buffalo_sc_w600k_mbf.onnx",
+        "w600k_r50.onnx",
+        "arcface.onnx",
     ]
 }
 
-pub fn find_rec_model() -> Option<std::path::PathBuf> {
-    let dir = crate::identity::models_dir()?;
+pub(crate) fn is_r50_kind(k: &str) -> bool {
+    k == FACE_KIND_ARCFACE || k == FACE_KIND_ARCFACE_R50
+}
+
+fn rec_override_path(dir: &Path, spec: &str) -> Option<PathBuf> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    if spec.eq_ignore_ascii_case("r50") {
+        return Some(dir.join("w600k_r50.onnx"));
+    }
+    if spec.eq_ignore_ascii_case("mbf") {
+        return Some(dir.join("w600k_mbf.onnx"));
+    }
+    let p = PathBuf::from(spec);
+    if p.is_file() {
+        return Some(p);
+    }
+    let joined = dir.join(spec);
+    if joined.is_file() {
+        Some(joined)
+    } else {
+        None
+    }
+}
+
+fn gallery_has_r50<S: AsRef<str>>(gallery_kinds: &[S]) -> bool {
+    gallery_kinds.iter().any(|k| is_r50_kind(k.as_ref()))
+}
+
+fn gallery_kinds_snapshot() -> Option<Vec<String>> {
+    GALLERY_KINDS.lock().ok()?.clone()
+}
+
+fn log_missing_face_rec(spec: &str) {
+    static ONCE: Once = Once::new();
+    let spec = spec.to_string();
+    ONCE.call_once(move || {
+        eprintln!("buckyboi: BUCKYBOI_FACE_REC={spec} not found; using gallery heuristic");
+    });
+}
+
+/// Prefer MobileFaceNet unless the gallery already has r50 / `arcface` vectors.
+#[cfg_attr(not(feature = "face"), allow(dead_code))]
+pub(crate) fn select_rec_model<S: AsRef<str>>(gallery_kinds: &[S]) -> Option<PathBuf> {
+    select_rec_model_in(crate::identity::models_dir()?.as_path(), gallery_kinds)
+}
+
+fn select_rec_model_in<S: AsRef<str>>(dir: &Path, gallery_kinds: &[S]) -> Option<PathBuf> {
+    if let Ok(spec) = std::env::var("BUCKYBOI_FACE_REC") {
+        let spec = spec.trim();
+        if !spec.is_empty() {
+            match rec_override_path(dir, spec).filter(|p| p.is_file()) {
+                Some(p) => return Some(p),
+                None => log_missing_face_rec(spec),
+            }
+        }
+    }
+    if gallery_has_r50(gallery_kinds) {
+        let r50 = dir.join("w600k_r50.onnx");
+        if r50.is_file() {
+            return Some(r50);
+        }
+        let alias = dir.join("arcface.onnx");
+        if alias.is_file() {
+            return Some(alias);
+        }
+    }
     for name in rec_model_names() {
         let p = dir.join(name);
         if p.is_file() {
@@ -147,6 +235,16 @@ pub fn find_rec_model() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Production r50 keeps `kind=arcface` so existing galleries still match.
+pub fn rec_embed_kind(model_name: &str) -> &'static str {
+    let n = model_name.to_ascii_lowercase();
+    if n.contains("mbf") || n.contains("mobilefacenet") || n.contains("buffalo_sc") {
+        FACE_KIND_ARCFACE_MBF
+    } else {
+        FACE_KIND_ARCFACE
+    }
 }
 
 /// Env override wins; else model-aware default when `configured` is still
@@ -431,24 +529,41 @@ mod onnx {
         REC.lock().ok()?.as_ref().map(|r| r.name.clone())
     }
 
+    pub fn drop_session() {
+        if let Ok(mut g) = REC.lock() {
+            *g = None;
+        }
+    }
+
     fn session() -> Option<()> {
-        let mut g = REC.lock().ok()?;
-        if g.is_some() {
+        if REC.lock().ok()?.is_some() {
             return Some(());
         }
-        let path = find_rec_model()?;
+        let kinds = gallery_kinds_snapshot()?;
+        let mut recg = REC.lock().ok()?;
+        if recg.is_some() {
+            return Some(());
+        }
+        let path = select_rec_model(&kinds)?;
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("arcface")
             .to_string();
         let sess = crate::identity::ort_sess::session_from_file(&path)?;
-        eprintln!(
-            "buckyboi: ArcFace {} (cosine ~{:.2})",
-            name,
-            face_cosine_threshold(&name)
-        );
-        *g = Some(Rec {
+        let kind = rec_embed_kind(&name);
+        if kind == FACE_KIND_ARCFACE && gallery_has_r50(&kinds) {
+            eprintln!(
+                "buckyboi: ArcFace r50 (gallery has arcface vectors; BUCKYBOI_FACE_REC=mbf + re-enroll FACE to switch)"
+            );
+        } else {
+            eprintln!(
+                "buckyboi: ArcFace {} (cosine ~{:.2}, kind={kind})",
+                name,
+                face_cosine_threshold(&name)
+            );
+        }
+        *recg = Some(Rec {
             session: sess,
             name,
         });
@@ -476,7 +591,7 @@ mod onnx {
         if data.len() < 128 {
             return None;
         }
-        Some(Embedding::new(FACE_KIND_ARCFACE, data))
+        Some(Embedding::new(rec_embed_kind(&rec.name), data))
     }
 
     pub fn drop_rec() {
@@ -505,6 +620,8 @@ pub fn reload_rec() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static REC_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn skin_patch(w: u32, h: u32) -> Vec<u8> {
         let mut rgb = vec![20u8; (w * h * 3) as usize];
@@ -591,6 +708,104 @@ mod tests {
         assert!((t - 0.40).abs() < 1e-6);
         let custom = effective_face_threshold(0.55, Some("w600k_mbf.onnx"));
         assert!((custom - 0.55).abs() < 1e-6);
+        assert_eq!(rec_embed_kind("w600k_r50.onnx"), FACE_KIND_ARCFACE);
+        assert_eq!(rec_embed_kind("w600k_mbf.onnx"), FACE_KIND_ARCFACE_MBF);
+        assert_eq!(
+            rec_embed_kind("buffalo_sc_w600k_mbf.onnx"),
+            FACE_KIND_ARCFACE_MBF
+        );
+    }
+
+    struct RestoreFaceRec {
+        prev: Option<String>,
+        dir: PathBuf,
+    }
+
+    impl Drop for RestoreFaceRec {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("BUCKYBOI_FACE_REC", v),
+                None => std::env::remove_var("BUCKYBOI_FACE_REC"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn rec_tmp() -> RestoreFaceRec {
+        let dir = std::env::temp_dir().join(format!(
+            "buckyboi-rec-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("w600k_r50.onnx"), b"x").unwrap();
+        std::fs::write(dir.join("w600k_mbf.onnx"), b"x").unwrap();
+        RestoreFaceRec {
+            prev: std::env::var("BUCKYBOI_FACE_REC").ok(),
+            dir,
+        }
+    }
+
+    #[test]
+    fn select_rec_model_arcface_gallery_picks_r50() {
+        let _env = REC_ENV_LOCK.lock().unwrap();
+        let ctx = rec_tmp();
+        std::env::remove_var("BUCKYBOI_FACE_REC");
+        let r50 = select_rec_model_in(&ctx.dir, &["arcface"]).unwrap();
+        assert_eq!(r50.file_name().unwrap(), "w600k_r50.onnx");
+        let r50_alias = select_rec_model_in(&ctx.dir, &["arcface-r50"]).unwrap();
+        assert_eq!(r50_alias.file_name().unwrap(), "w600k_r50.onnx");
+        let empty: [&str; 0] = [];
+        let empty = select_rec_model_in(&ctx.dir, &empty).unwrap();
+        assert_eq!(empty.file_name().unwrap(), "w600k_mbf.onnx");
+        let mbf = select_rec_model_in(&ctx.dir, &["arcface-mbf"]).unwrap();
+        assert_eq!(mbf.file_name().unwrap(), "w600k_mbf.onnx");
+    }
+
+    #[test]
+    fn select_rec_model_face_rec_override() {
+        let _env = REC_ENV_LOCK.lock().unwrap();
+        let ctx = rec_tmp();
+        std::env::set_var("BUCKYBOI_FACE_REC", "mbf");
+        let over_mbf = select_rec_model_in(&ctx.dir, &["arcface"]).unwrap();
+        assert_eq!(over_mbf.file_name().unwrap(), "w600k_mbf.onnx");
+        std::env::set_var("BUCKYBOI_FACE_REC", "r50");
+        let empty: [&str; 0] = [];
+        let over_r50 = select_rec_model_in(&ctx.dir, &empty).unwrap();
+        assert_eq!(over_r50.file_name().unwrap(), "w600k_r50.onnx");
+        std::env::set_var("BUCKYBOI_FACE_REC", "missing.onnx");
+        let fall = select_rec_model_in(&ctx.dir, &empty).unwrap();
+        assert_eq!(fall.file_name().unwrap(), "w600k_mbf.onnx");
+    }
+
+    #[test]
+    fn rec_waits_until_gallery_kinds_set() {
+        struct Restore(Option<Vec<String>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Ok(mut g) = GALLERY_KINDS.lock() {
+                    *g = self.0.take();
+                }
+            }
+        }
+        let _restore = Restore(gallery_kinds_snapshot());
+        if let Ok(mut g) = GALLERY_KINDS.lock() {
+            *g = None;
+        }
+        assert!(gallery_kinds_snapshot().is_none());
+        set_gallery_kinds(&[]);
+        assert_eq!(gallery_kinds_snapshot().as_deref(), Some(&[][..]));
+        if let Ok(mut g) = GALLERY_KINDS.lock() {
+            *g = None;
+        }
+        set_gallery_kinds(&["arcface".into()]);
+        assert_eq!(
+            gallery_kinds_snapshot().as_deref(),
+            Some(["arcface".to_string()].as_slice())
+        );
     }
 
     #[test]

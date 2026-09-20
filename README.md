@@ -92,7 +92,8 @@ chmod +x scripts/download-models.sh
 | File in `~/.config/buckyboi/models/` | Used by |
 | --- | --- |
 | `det_10g.onnx` | `--features face` SCRFD (bbox + 5 landmarks) |
-| `w600k_r50.onnx` or `w600k_mbf.onnx` | `--features face` ArcFace after `norm_crop` |
+| `w600k_mbf.onnx` | `--features face` ArcFace (default on empty / mbf galleries) |
+| `w600k_r50.onnx` | `--features face` ArcFace kept for existing `kind=arcface` galleries |
 | `3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx` | `--features voice` sherpa (English default) |
 | `3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx` | EN fallback speaker net |
 | `palm_detection.onnx` / `hand_landmark.onnx` | `--features hands` MediaPipe ONNX |
@@ -100,10 +101,15 @@ chmod +x scripts/download-models.sh
 Face path when both detector and rec nets are present: **detect →
 5-point similarity align (`arcface_dst` 112×112) → BGR `(x-127.5)/128`
 → ArcFace**. A bbox-only resize is the degraded fallback if landmarks
-are missing. Cosine on L2-normalized embeddings; defaults **0.35**
-(R50) / **0.40** (MBF). Override with `face_threshold` in
-`profiles.json` or `BUCKYBOI_FACE_THRESHOLD`. Several faces: keep the
-**largest / most central** (InsightFace `area − 2·offset²`).
+are missing. Cosine on L2-normalized embeddings; defaults **0.40**
+(MBF, `kind=arcface-mbf`) / **0.35** (R50, `kind=arcface`). Empty
+galleries pick **mbf**; a gallery that already has `arcface` /
+`arcface-r50` vectors keeps r50 so it still matches. Override with
+`BUCKYBOI_FACE_REC=mbf|r50|/path`. `BUCKYBOI_FACE_R50=1` also downloads
+the larger net (existing `w600k_r50.onnx` is never deleted). Override
+the threshold with `face_threshold` in `profiles.json` or
+`BUCKYBOI_FACE_THRESHOLD`. Several faces: keep the **largest / most
+central** (InsightFace `area − 2·offset²`).
 
 InsightFace weights are **not** MIT. Read their license before
 redistributing `det_10g` / `w600k_*`. They are **not vendored** in
