@@ -232,10 +232,7 @@ impl EnrollSession {
         match status {
             HandStatus::NoModel => self.fail_now("NO MODEL"),
             HandStatus::NoHand => self.note_reject("NO HAND"),
-            HandStatus::Ok(h) => {
-                self.rejects = 0;
-                self.push_gesture(&h.normalized())
-            }
+            HandStatus::Ok(h) => self.push_gesture(&h.normalized()),
         }
     }
 
@@ -585,6 +582,27 @@ mod tests {
         s.begin_capture_at(50);
         s.begin_capture();
         assert_eq!(s.started_ms, 50);
+    }
+
+    #[test]
+    fn face_no_embed_fails_now_lighting_stays_cap() {
+        let mut s = EnrollSession::start_face("Ada", None);
+        assert_eq!(s.push_face(ok_face(), None), EnrollEvent::Failed);
+        assert!(matches!(
+            s.phase,
+            EnrollPhase::Failed { ref reason } if reason == "NO MODEL"
+        ));
+        assert_eq!(s.hint(), "NO MODEL");
+        let mut t = EnrollSession::start_face("Ada", None);
+        let no_face = FaceQuality {
+            ok: false,
+            reject: crate::identity::face::FaceReject::NoFace,
+            ..ok_face()
+        };
+        assert_eq!(t.push_face(no_face, None), EnrollEvent::Rejected);
+        assert!(!matches!(t.phase, EnrollPhase::Failed { .. }));
+        assert_eq!(t.hint(), "NO FACE");
+        assert_eq!(t.rejects, 1);
     }
 
     #[test]

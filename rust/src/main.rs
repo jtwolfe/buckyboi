@@ -225,18 +225,7 @@ fn identity_tick(
                 if now.saturating_sub(snap.t_ms) <= SNAP_FRESH_MS && snap.t_ms != *last_hand_ms =>
             {
                 *last_hand_ms = snap.t_ms;
-                match snap.status {
-                    HandStatus::NoModel => {
-                        let _ = enroll.fail_now("NO MODEL");
-                    }
-                    HandStatus::NoHand => {
-                        let _ = enroll.note_reject("NO HAND");
-                    }
-                    HandStatus::Ok(h) => {
-                        enroll.rejects = 0;
-                        let _ = enroll.push_gesture(&h.normalized());
-                    }
-                }
+                let _ = enroll.apply_hand_status(&snap.status);
             }
             _ => {}
         }
