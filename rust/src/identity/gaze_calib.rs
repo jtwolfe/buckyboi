@@ -509,7 +509,7 @@ impl GazeCalibSession {
             self.hint = if enough {
                 "GAZE OK".into()
             } else {
-                "RECALIBRATE".into()
+                String::new()
             };
             self.progress = 1.0;
             return if enough {

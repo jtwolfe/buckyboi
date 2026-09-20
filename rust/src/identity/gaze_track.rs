@@ -164,7 +164,8 @@ fn scale_if_unit(pts: &mut [(f32, f32, f32)]) {
     }
 }
 
-/// Iris center in the eye box, clamped 0..1, then mirror X for the selfie cam.
+/// Iris center in the eye box, clamped 0..1 in **camera** space (0 = left).
+/// Selfie mirror is applied once in `gaze::uncalibrated`, not here.
 pub fn iris_in_eye(iris: (f32, f32), corners: [(f32, f32); 4]) -> Option<(f32, f32)> {
     let min_x = corners.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
     let max_x = corners
@@ -183,7 +184,7 @@ pub fn iris_in_eye(iris: (f32, f32), corners: [(f32, f32); 4]) -> Option<(f32, f
     }
     let nx = ((iris.0 - min_x) / dw).clamp(0.0, 1.0);
     let ny = ((iris.1 - min_y) / dh).clamp(0.0, 1.0);
-    Some((1.0 - nx, ny))
+    Some((nx, ny))
 }
 
 pub fn feat_from_landmarks(
@@ -246,10 +247,6 @@ pub fn feat_from_landmarks(
 /// Run the landmarker when the ONNX file is present. `None` = no net.
 pub fn infer(rgb: &[u8], w: u32, h: u32, face: &DetectedFace) -> Option<GazeFeat> {
     onnx::infer(rgb, w, h, face)
-}
-
-pub fn model_present() -> bool {
-    landmarker_path().is_some()
 }
 
 fn landmarker_path() -> Option<std::path::PathBuf> {
@@ -397,14 +394,20 @@ mod tests {
         // Left eye {33,133,159,145}: outer, inner, upper, lower.
         let corners = [(10.0, 20.0), (30.0, 20.0), (20.0, 10.0), (20.0, 30.0)];
         let (nx, ny) = iris_in_eye((20.0, 20.0), corners).unwrap();
-        // Center of box, mirrored X → nx = 0.5.
         assert!((nx - 0.5).abs() < 1e-4);
         assert!((ny - 0.5).abs() < 1e-4);
         let (nx, _) = iris_in_eye((10.0, 20.0), corners).unwrap();
-        // At outer (min x) → nx' = 1 - 0 = 1.
-        assert!((nx - 1.0).abs() < 1e-4);
+        // Camera-left of the eye box stays left (no pre-mirror).
+        assert!((nx - 0.0).abs() < 1e-4);
         assert_eq!(LEFT_EYE, [33, 133, 159, 145]);
         assert_eq!(RIGHT_EYE, [362, 263, 386, 374]);
+        let (sx, _) = crate::gaze::uncalibrated(nx, 0.5, 0.5, 0.5, 1920.0, 1080.0);
+        let (face_sx, _) =
+            crate::gaze::face_to_screen(10.0, 20.0, 80.0, 40.0, 1920.0, 1080.0, true);
+        assert!(
+            sx > 960.0 && face_sx > 960.0,
+            "camera-left iris {sx} vs face_to_screen {face_sx}"
+        );
     }
 
     #[test]

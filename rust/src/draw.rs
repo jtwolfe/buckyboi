@@ -1009,12 +1009,10 @@ fn paint_gaze_calib(
     off_x: f32,
     off_y: f32,
 ) {
-    let n = crate::identity::calib_point_count();
-    let n = if n == 9 { 9 } else { 5 };
+    let n = if hud.gaze_calib_n == 9 { 9 } else { 5 };
     for i in 0..n {
         let (dx, dy) = crate::identity::dot_pos(i, n, screen_w, screen_h);
-        let hot = hud.gaze_calib_hint.starts_with("HOLD")
-            || crate::identity::look_hint(i, n) == hud.gaze_calib_hint;
+        let hot = i == hud.gaze_calib_idx;
         let rad = if hot { 14.0 } else { 9.0 };
         fill_disk(
             buf,

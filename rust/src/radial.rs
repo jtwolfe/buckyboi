@@ -126,6 +126,8 @@ pub struct IdentityHud {
     pub gaze_calib_open: bool,
     pub gaze_calib_hint: String,
     pub gaze_calib_progress: f32,
+    pub gaze_calib_idx: usize,
+    pub gaze_calib_n: usize,
 }
 
 #[derive(Clone, Debug)]

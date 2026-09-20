@@ -91,6 +91,8 @@ fn hud_from(
         gaze_calib_open: calib.open,
         gaze_calib_hint,
         gaze_calib_progress: calib.progress(),
+        gaze_calib_idx: calib.current_idx(),
+        gaze_calib_n: calib.n_dots(),
     }
 }
 
@@ -318,10 +320,23 @@ fn apply_identity_action(
     }
 }
 
-fn close_gaze_calib(menu: &mut RadialMenu, calib: &mut GazeCalibSession) {
+fn gaze_calib_stale(sw: u32, sh: u32) -> bool {
+    GazeCalib::load()
+        .map(|c| c.is_stale(sw, sh))
+        .unwrap_or(false)
+}
+
+fn close_gaze_calib(
+    menu: &mut RadialMenu,
+    calib: &mut GazeCalibSession,
+    sw: u32,
+    sh: u32,
+    calib_stale: &mut bool,
+) {
     calib.cancel();
     menu.calib_open = false;
     menu.freeze_ms = None;
+    *calib_stale = gaze_calib_stale(sw, sh);
 }
 
 fn finish_gaze_calib(
@@ -336,7 +351,7 @@ fn finish_gaze_calib(
     calib_stale: &mut bool,
 ) {
     let cam = camera_label();
-    let fitted = if buckyboi::identity::calib_point_count() == 9 {
+    let fitted = if calib.n_dots() == 9 {
         buckyboi::identity::from_ridge(obs, sw, sh, &cam)
     } else {
         buckyboi::identity::from_affine(obs, sw, sh, &cam)
@@ -351,13 +366,11 @@ fn finish_gaze_calib(
             *calib_stale = false;
             eprintln!("buckyboi: gaze: landmarker+calib rmse={rmse:.0}px");
         } else {
-            *calib_stale = true;
+            *calib_stale = gaze_calib_stale(sw, sh);
             eprintln!("buckyboi: gaze calib save failed — previous file kept");
         }
     } else {
-        *calib_stale = GazeCalib::load()
-            .map(|c| c.is_stale(sw, sh))
-            .unwrap_or(true);
+        *calib_stale = gaze_calib_stale(sw, sh);
         eprintln!("buckyboi: gaze calib rejected (RMSE) — previous file kept");
     }
     let listen_ms = listen_override_ms().unwrap_or(settings.listen_ms as u64);
@@ -715,9 +728,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_face_ms = 0u64;
     let mut last_gesture_action_ms = 0u64;
     let mut gaze_calib = GazeCalibSession::new();
-    let mut calib_stale = GazeCalib::load()
-        .map(|c| c.is_stale(sw as u32, sh as u32))
-        .unwrap_or(false);
+    let mut calib_stale = gaze_calib_stale(sw as u32, sh as u32);
 
     let mut gaze_drive = match env_or_alias("BUCKYBOI_GAZE_SIM", "BUDDY_GAZE_SIM").as_deref() {
         Some("mouse") => {
@@ -795,9 +806,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.sw = sw as f32;
             state.sh = sh as f32;
             set_screen(sw as u32, sh as u32);
-            calib_stale = GazeCalib::load()
-                .map(|c| c.is_stale(sw as u32, sh as u32))
-                .unwrap_or(false);
+            calib_stale = gaze_calib_stale(sw as u32, sh as u32);
         }
 
         let mut input: FrameInput = backend.poll_input()?;
@@ -846,9 +855,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     now,
                 );
             } else if menu.calib_open {
-                gaze_calib.cancel();
-                menu.calib_open = false;
-                menu.freeze_ms = None;
+                close_gaze_calib(
+                    &mut menu,
+                    &mut gaze_calib,
+                    sw as u32,
+                    sh as u32,
+                    &mut calib_stale,
+                );
                 eprintln!("buckyboi: gaze calib cancelled");
             } else {
                 break;
@@ -1094,8 +1107,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                         CalibEvent::Failed => {
-                            close_gaze_calib(&mut menu, &mut gaze_calib);
-                            calib_stale = true;
+                            close_gaze_calib(
+                                &mut menu,
+                                &mut gaze_calib,
+                                sw as u32,
+                                sh as u32,
+                                &mut calib_stale,
+                            );
                             eprintln!("buckyboi: gaze calib failed — previous file kept");
                         }
                     }
@@ -1279,7 +1297,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         RadialAction::CancelGazeCalib => {
-                            close_gaze_calib(&mut menu, &mut gaze_calib);
+                            close_gaze_calib(
+                                &mut menu,
+                                &mut gaze_calib,
+                                sw as u32,
+                                sh as u32,
+                                &mut calib_stale,
+                            );
                             eprintln!("buckyboi: gaze calib cancelled");
                         }
                         RadialAction::SkipGazeCalib => match gaze_calib.skip_current(now) {
@@ -1297,8 +1321,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                             CalibEvent::Failed => {
-                                close_gaze_calib(&mut menu, &mut gaze_calib);
-                                calib_stale = true;
+                                close_gaze_calib(
+                                    &mut menu,
+                                    &mut gaze_calib,
+                                    sw as u32,
+                                    sh as u32,
+                                    &mut calib_stale,
+                                );
                                 eprintln!("buckyboi: gaze calib failed — previous file kept");
                             }
                             CalibEvent::None => {}

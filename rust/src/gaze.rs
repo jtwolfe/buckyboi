@@ -529,4 +529,19 @@ mod tests {
         assert!((sy2 - sy0).abs() > 20.0);
         assert!((sx0 - 960.0).abs() < 1.0 && (sy0 - 540.0).abs() < 1.0);
     }
+
+    #[test]
+    fn uncalibrated_camera_left_iris_matches_face_to_screen_mirror() {
+        // iris_nx is camera-space (0 = left). One mirror lives in uncalibrated.
+        let (iris_sx, _) = uncalibrated(0.2, 0.5, 0.5, 0.5, 1920.0, 1080.0);
+        let (face_sx, _) = face_to_screen(0.2 * 320.0, 120.0, 320.0, 240.0, 1920.0, 1080.0, true);
+        assert!(
+            iris_sx > 960.0,
+            "camera-left iris → screen right, got {iris_sx}"
+        );
+        assert!(
+            face_sx > 960.0,
+            "camera-left face → screen right, got {face_sx}"
+        );
+    }
 }

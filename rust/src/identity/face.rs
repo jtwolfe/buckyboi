@@ -461,21 +461,11 @@ pub fn probe_embed(rgb: &[u8], w: u32, h: u32, bbox: FaceBox) -> Embedding {
 
 /// Extract an embedding. Prefers detect → align → ArcFace when models exist.
 pub fn extract_embedding(rgb: &[u8], w: u32, h: u32) -> (FaceQuality, Option<Embedding>) {
-    extract_parts(rgb, w, h, true)
-}
-
-/// Detect + quality + look publish. ArcFace / probe only when `want_embed`.
-pub fn extract_parts(
-    rgb: &[u8],
-    w: u32,
-    h: u32,
-    want_embed: bool,
-) -> (FaceQuality, Option<Embedding>) {
-    let (q, e, _) = extract_detected(rgb, w, h, want_embed);
+    let (q, e, _) = extract_detected(rgb, w, h, true);
     (q, e)
 }
 
-/// Same as `extract_parts`, plus the primary `DetectedFace` for gaze ROI.
+/// Detect + quality + look publish. ArcFace / probe only when `want_embed`.
 pub fn extract_detected(
     rgb: &[u8],
     w: u32,
