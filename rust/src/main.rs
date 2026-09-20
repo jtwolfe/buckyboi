@@ -1,25 +1,20 @@
-//! Fullscreen X11 overlay buddy. Transparent, input-shaped, no ASR/LLM.
+//! Fullscreen overlay buddy. Wayland (wlr-layer-shell) or X11 Shape/XFixes.
 //! See README.md and UX.md.
 
-use buckyboi::{
-    camera, chase_gaze, click_listening_ex, corner_on, draw, gaze_over_hysteresis, hit_rects,
-    hit_test, initial_on, load_settings, overlay_bounds, save_settings, spin,
-    step_overlay_avoid, AuthSession, BuddyUx, EnrollKind, EnrollPhase, EnrollSession, GazeLock,
-    GazeSmoother, GestureAction, GestureClass, IdentityHud, Phase, ProfileStore,
-    RadialAction, RadialMenu, Settings, SettingsPage, UxEvent, HIT_RADIUS,
+use buckyboi::display::{
+    bounds_rect, open_backend, paint_rect, send_command, BackendKind, FrameInput, WakeBus,
+    WakeCommand,
 };
 use buckyboi::identity::{env_flag, env_flag_alias, env_or_alias, extract_face, hands, voice};
+use buckyboi::{
+    camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
+    initial_on, load_settings, overlay_bounds, save_settings, spin, step_overlay_avoid,
+    AuthSession, BuddyUx, EnrollKind, EnrollPhase, EnrollSession, GazeLock, GazeSmoother,
+    GestureAction, GestureClass, IdentityHud, Phase, ProfileStore, RadialAction, RadialMenu,
+    Settings, SettingsPage, UxEvent, HIT_RADIUS,
+};
 use std::env;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use x11rb::connection::{Connection, RequestConnection};
-use x11rb::protocol::shape::{self, ConnectionExt as _};
-use x11rb::protocol::xfixes::ConnectionExt as _;
-use x11rb::protocol::xproto::*;
-use x11rb::protocol::Event;
-use x11rb::rust_connection::RustConnection;
-use x11rb::wrapper::ConnectionExt as _;
-
-const ESCAPE_KEYSYM: u32 = 0xFF1B;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -79,11 +74,17 @@ fn finish_enroll(enroll: &mut EnrollSession, profiles: &mut ProfileStore, settin
     match enroll.kind {
         EnrollKind::Face => {
             profiles.replace_face(&id, enroll.accepted.clone());
-            eprintln!("buckyboi: enrolled face for {name} ({} vectors)", enroll.accepted.len());
+            eprintln!(
+                "buckyboi: enrolled face for {name} ({} vectors)",
+                enroll.accepted.len()
+            );
         }
         EnrollKind::Voice => {
             profiles.replace_voice(&id, enroll.accepted.clone());
-            eprintln!("buckyboi: enrolled voice for {name} ({} vectors)", enroll.accepted.len());
+            eprintln!(
+                "buckyboi: enrolled voice for {name} ({} vectors)",
+                enroll.accepted.len()
+            );
         }
         EnrollKind::Gesture => {
             if let Some(cls) = enroll.gesture {
@@ -147,20 +148,15 @@ fn identity_tick(
     if let Some(frame) = frame {
         if now.saturating_sub(*last_face_ms) >= 180 {
             *last_face_ms = now;
-            let (q, emb) = if matches!(enroll.kind, EnrollKind::Face)
-                && !matches!(enroll.phase, EnrollPhase::Idle)
-            {
-                extract_face(&frame.rgb, frame.w, frame.h)
-            } else {
-                extract_face(&frame.rgb, frame.w, frame.h)
-            };
+            let (_q, emb) = extract_face(&frame.rgb, frame.w, frame.h);
             if matches!(enroll.kind, EnrollKind::Face)
-                && !matches!(enroll.phase, EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. })
+                && !matches!(
+                    enroll.phase,
+                    EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+                )
             {
-                let ev = enroll.push_face(q, emb.clone());
-                if ev == buckyboi::identity::EnrollEvent::Finished {
-                    // finished below
-                }
+                let ev = enroll.push_face(_q, emb.clone());
+                let _ = ev;
             } else if let Some(emb) = emb {
                 if let Some(hit) = profiles.match_face(&emb) {
                     auth.note_face(&hit.person_id, &hit.name, now, hit.score);
@@ -170,7 +166,10 @@ fn identity_tick(
     }
 
     if matches!(enroll.kind, EnrollKind::Voice)
-        && !matches!(enroll.phase, EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. })
+        && !matches!(
+            enroll.phase,
+            EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+        )
         && now.saturating_sub(*last_voice_ms) >= 1_600
     {
         *last_voice_ms = now;
@@ -179,7 +178,9 @@ fn identity_tick(
             let (q, emb) = voice::extract_embedding(&samples, voice::VOICE_SAMPLE_RATE);
             let _ = enroll.push_voice(q, emb);
         }
-    } else if matches!(enroll.phase, EnrollPhase::Idle) && now.saturating_sub(*last_voice_ms) >= 2_400 {
+    } else if matches!(enroll.phase, EnrollPhase::Idle)
+        && now.saturating_sub(*last_voice_ms) >= 2_400
+    {
         if let Some(samples) = voice_samples_optional() {
             *last_voice_ms = now;
             let (q, emb) = voice::extract_embedding(&samples, voice::VOICE_SAMPLE_RATE);
@@ -197,23 +198,26 @@ fn identity_tick(
         if let Some(hand) = current_hand() {
             *last_hand_ms = now;
             if matches!(enroll.kind, EnrollKind::Gesture)
-                && !matches!(enroll.phase, EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. })
+                && !matches!(
+                    enroll.phase,
+                    EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+                )
             {
                 let _ = enroll.push_gesture(&hand.normalized());
             }
         }
     }
 
-    if matches!(enroll.phase, EnrollPhase::Done { .. }) {
-        // caller persists
-    }
     let _ = settings;
 }
 
 fn voice_tone() -> Vec<f32> {
     let n = voice::VOICE_SAMPLE_RATE * 1600 / 1000;
     (0..n)
-        .map(|i| 0.22 * (2.0 * std::f32::consts::PI * 196.0 * i as f32 / voice::VOICE_SAMPLE_RATE as f32).sin())
+        .map(|i| {
+            0.22 * (2.0 * std::f32::consts::PI * 196.0 * i as f32 / voice::VOICE_SAMPLE_RATE as f32)
+                .sin()
+        })
         .collect()
 }
 
@@ -253,7 +257,10 @@ fn apply_identity_action(
     auth: &mut AuthSession,
 ) {
     match act {
-        RadialAction::CycleGate | RadialAction::ToggleNeedFace | RadialAction::TabLook | RadialAction::TabPeople => {
+        RadialAction::CycleGate
+        | RadialAction::ToggleNeedFace
+        | RadialAction::TabLook
+        | RadialAction::TabPeople => {
             save_settings(settings);
         }
         RadialAction::NewPerson => {
@@ -289,7 +296,12 @@ fn apply_identity_action(
         }
         RadialAction::StartEnrollHands => {
             let (name, id) = person_target(profiles, settings);
-            *enroll = EnrollSession::start_gesture(name, id, GestureClass::Fist, hands::GESTURE_ENROLL_NEED);
+            *enroll = EnrollSession::start_gesture(
+                name,
+                id,
+                GestureClass::Fist,
+                hands::GESTURE_ENROLL_NEED,
+            );
             enroll.begin_capture();
             eprintln!("buckyboi: gesture calibrate — hold FIST (BUCKYBOI_HAND_SIM=fist …)");
         }
@@ -354,406 +366,62 @@ enum GazeDrive {
     Chase { origin_ms: u64 },
 }
 
-fn find_argb_visual(screen: &Screen) -> Option<(u8, Visualid)> {
-    for depth in &screen.allowed_depths {
-        if depth.depth != 32 {
-            continue;
-        }
-        for vis in &depth.visuals {
-            if vis.class == VisualClass::TRUE_COLOR {
-                return Some((32, vis.visual_id));
-            }
-        }
-    }
-    None
-}
-
-fn intern(conn: &RustConnection, name: &[u8]) -> Atom {
-    conn.intern_atom(false, name)
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .map(|r| r.atom)
-        .unwrap_or(0)
-}
-
-fn set_dock_hints(conn: &RustConnection, win: Window) -> Result<(), Box<dyn std::error::Error>> {
-    let t = intern(conn, b"_NET_WM_WINDOW_TYPE");
-    let dock = intern(conn, b"_NET_WM_WINDOW_TYPE_DOCK");
-    conn.change_property32(PropMode::REPLACE, win, t, AtomEnum::ATOM, &[dock])?;
-
-    let state = intern(conn, b"_NET_WM_STATE");
-    let above = intern(conn, b"_NET_WM_STATE_ABOVE");
-    let sticky = intern(conn, b"_NET_WM_STATE_STICKY");
-    let skip_task = intern(conn, b"_NET_WM_STATE_SKIP_TASKBAR");
-    let skip_pager = intern(conn, b"_NET_WM_STATE_SKIP_PAGER");
-    conn.change_property32(
-        PropMode::REPLACE,
-        win,
-        state,
-        AtomEnum::ATOM,
-        &[above, sticky, skip_task, skip_pager],
-    )?;
-
-    // Do not reserve a dock strut.
-    let strut = intern(conn, b"_NET_WM_STRUT_PARTIAL");
-    conn.change_property32(PropMode::REPLACE, win, strut, AtomEnum::CARDINAL, &[0; 12])?;
-
-    conn.change_property8(
-        PropMode::REPLACE,
-        win,
-        AtomEnum::WM_NAME,
-        AtomEnum::STRING,
-        b"buckyboi",
-    )?;
-    Ok(())
-}
-
-fn escape_keycodes(conn: &RustConnection, setup: &Setup) -> Vec<u8> {
-    let min = setup.min_keycode;
-    let count = setup.max_keycode.saturating_sub(min).saturating_add(1);
-    let Ok(cookie) = conn.get_keyboard_mapping(min, count) else {
-        return vec![9];
-    };
-    let Ok(reply) = cookie.reply() else {
-        return vec![9];
-    };
-    let w = reply.keysyms_per_keycode as usize;
-    let mut out = Vec::new();
-    for (i, chunk) in reply.keysyms.chunks(w).enumerate() {
-        if chunk.iter().any(|k| *k == ESCAPE_KEYSYM) {
-            out.push(min + i as u8);
-        }
-    }
-    if out.is_empty() {
-        out.push(9);
-    }
-    out
-}
-
-fn keymap_has(keys: &[u8], code: u8) -> bool {
-    let i = code as usize;
-    i < keys.len() * 8 && keys[i / 8] & (1 << (i % 8)) != 0
-}
-
-fn any_escape(keys: &[u8], codes: &[u8]) -> bool {
-    codes.iter().any(|c| keymap_has(keys, *c))
-}
-
-/// Input (and bounding) region. Empty = fully click-through.
-fn set_hit_region(
-    conn: &RustConnection,
-    win: Window,
-    hits: &[(i16, i16, u16, u16)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let rects: Vec<Rectangle> = hits
-        .iter()
-        .map(|&(x, y, width, height)| Rectangle {
-            x,
-            y,
-            width,
-            height,
-        })
-        .collect();
-    conn.shape_rectangles(
-        shape::SO::SET,
-        shape::SK::INPUT,
-        ClipOrdering::UNSORTED,
-        win,
-        0,
-        0,
-        &rects,
-    )?;
-    conn.shape_rectangles(
-        shape::SO::SET,
-        shape::SK::BOUNDING,
-        ClipOrdering::UNSORTED,
-        win,
-        0,
-        0,
-        &rects,
-    )?;
-    let region = conn.generate_id()?;
-    conn.xfixes_create_region(region, &rects)?;
-    conn.xfixes_set_window_shape_region(win, shape::SK::INPUT, 0, 0, region)?;
-    conn.xfixes_set_window_shape_region(win, shape::SK::BOUNDING, 0, 0, region)?;
-    conn.xfixes_destroy_region(region)?;
-    Ok(())
-}
-
-fn bounds_rect(b: (f32, f32, f32, f32), sw: u16, sh: u16) -> (i16, i16, u16, u16) {
-    let (x, y, w, h) = b;
-    let x0 = x.floor().max(0.0) as i32;
-    let y0 = y.floor().max(0.0) as i32;
-    let x1 = (x + w).ceil().min(sw as f32) as i32;
-    let y1 = (y + h).ceil().min(sh as f32) as i32;
-    (
-        x0 as i16,
-        y0 as i16,
-        (x1 - x0).max(1) as u16,
-        (y1 - y0).max(1) as u16,
-    )
-}
-
-fn clear_rect(
-    conn: &RustConnection,
-    win: Window,
-    gc: Gcontext,
-    x: i16,
-    y: i16,
-    w: u16,
-    h: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let n = w as usize * h as usize * 4;
-    let zeros = vec![0u8; n];
-    conn.put_image(
-        ImageFormat::Z_PIXMAP,
-        win,
-        gc,
-        w,
-        h,
-        x,
-        y,
-        0,
-        32,
-        &zeros,
-    )?;
-    Ok(())
-}
-
-fn paint_buddy(
-    conn: &RustConnection,
-    win: Window,
-    gc: Gcontext,
-    state: &buckyboi::State,
-    listening: bool,
-    pulse: f32,
-    dwell: f32,
-    menu: &RadialMenu,
-    settings: &Settings,
-    hud: &IdentityHud,
-    mx: f32,
-    my: f32,
-    now_ms: u64,
-    screen_w: f32,
-    screen_h: f32,
-    origin: (i16, i16, u16, u16),
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (ox, oy, w, h) = origin;
-    let mut buf = vec![0u8; w as usize * h as usize * 4];
-    let off_x = ox as f32;
-    let off_y = oy as f32;
-    draw::paint_wireframe(
-        &mut buf,
-        w,
-        h,
-        state,
-        off_x,
-        off_y,
-        listening,
-        settings.stroke,
+fn print_help() {
+    println!(
+        "buckyboi — Linux overlay buddy (gaze / voice / gesture identity)\n\n\
+         Usage: buckyboi [--wake|--quit]\n\n\
+         Fullscreen overlay on Wayland (wlr-layer-shell / Hyprland / Omarchy)\n\
+         or X11 (Shape + XFixes). Look at the icosahedron (or click it) to\n\
+         listen if the gate allows. Settings → ID enrolls face, voice, and\n\
+         gestures. Profiles stay in ~/.config/buckyboi/ (offline).\n\n\
+         Commands:\n\
+           buckyboi            run the overlay\n\
+           buckyboi --wake     wake a hidden instance (Hyprland bind)\n\
+           buckyboi --quit     quit a running instance\n\n\
+         Esc quits when the overlay has keyboard focus (X11: keymap poll).\n\
+         On Wayland, also bind SUPER+Escape → `buckyboi --quit`.\n\n\
+         Features (cargo): gaze (default), face, hands, voice, voice-sherpa\n\n\
+         Env:\n\
+           WAYLAND_DISPLAY         prefer native Wayland layer-shell\n\
+           DISPLAY                 X11 / XWayland fallback\n\
+           BUCKYBOI_DISPLAY        wayland | x11 | auto\n\
+           BUCKYBOI_LISTEN_MS      override listen duration (ms)\n\
+           BUCKYBOI_GAZE_LOCK_MS   override gaze-follow duration (ms)\n\
+           BUCKYBOI_CAMERA         V4L2 device (default /dev/video0)\n\
+           BUCKYBOI_NO_CAMERA      skip webcam\n\
+           BUCKYBOI_GAZE_SIM       mouse | chase\n\
+           BUCKYBOI_CONFIG         override config dir (tests)\n\
+           BUCKYBOI_MODELS         ONNX model directory\n\
+           BUCKYBOI_FACE_PROBE     weak local face print if no ArcFace model\n\
+           BUCKYBOI_FACE_SIM       synthetic face frames (no camera)\n\
+           BUCKYBOI_VOICE_SIM      tone | file  (no mic)\n\
+           BUCKYBOI_HAND_SIM       fist|palm|thumb|point|peace\n\
+           BUCKYBOI_SOCK           control socket (default $XDG_RUNTIME_DIR/buckyboi.sock)\n\n\
+         BUDDY_* aliases still work. See README.md and contrib/omarchy/."
     );
-    if !listening && dwell > 0.04 {
-        let rad = HIT_RADIUS * (0.62 + 0.28 * dwell);
-        let alpha = (36.0 + 90.0 * dwell) as u8;
-        draw::stroke(
-            &mut buf,
-            w,
-            h,
-            state.cx - off_x + rad,
-            state.cy - off_y,
-            state.cx - off_x + rad,
-            state.cy - off_y,
-            1.0,
-            0xC8,
-            0xD0,
-            0xDC,
-            alpha,
-        );
-        const N: i32 = 64;
-        for i in 0..N {
-            let t0 = i as f32 * (std::f32::consts::TAU / N as f32);
-            let t1 = (i + 1) as f32 * (std::f32::consts::TAU / N as f32);
-            draw::stroke(
-                &mut buf,
-                w,
-                h,
-                state.cx - off_x + rad * t0.cos(),
-                state.cy - off_y + rad * t0.sin(),
-                state.cx - off_x + rad * t1.cos(),
-                state.cy - off_y + rad * t1.sin(),
-                1.6,
-                0xC8,
-                0xD0,
-                0xDC,
-                alpha,
-            );
-        }
-    }
-    if listening {
-        let rad = HIT_RADIUS * (0.72 + 0.10 * pulse);
-        let alpha = (50.0 + 90.0 * pulse) as u8;
-        const N: i32 = 64;
-        for i in 0..N {
-            let t0 = i as f32 * (std::f32::consts::TAU / N as f32);
-            let t1 = (i + 1) as f32 * (std::f32::consts::TAU / N as f32);
-            draw::stroke(
-                &mut buf,
-                w,
-                h,
-                state.cx - off_x + rad * t0.cos(),
-                state.cy - off_y + rad * t0.sin(),
-                state.cx - off_x + rad * t1.cos(),
-                state.cy - off_y + rad * t1.sin(),
-                1.8,
-                0x7E,
-                0xE8,
-                0xFF,
-                alpha,
-            );
-        }
-        draw::paint_listening_chrome(
-            &mut buf,
-            w,
-            h,
-            state.cx,
-            state.cy,
-            menu,
-            settings,
-            hud,
-            mx,
-            my,
-            now_ms,
-            screen_w,
-            screen_h,
-            off_x,
-            off_y,
-        );
-    }
-    let known = hud.auth_label != "UNKNOWN" && !hud.auth_label.is_empty();
-    if !hud.auth_label.is_empty() {
-        draw::paint_auth_chip(
-            &mut buf,
-            w,
-            h,
-            state.cx,
-            state.cy,
-            &hud.auth_label,
-            known,
-            off_x,
-            off_y,
-        );
-    }
-    conn.put_image(
-        ImageFormat::Z_PIXMAP,
-        win,
-        gc,
-        w,
-        h,
-        ox,
-        oy,
-        0,
-        32,
-        &buf,
-    )?;
-    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if env::args().any(|a| a == "-h" || a == "--help") {
-        println!(
-            "buckyboi — Linux overlay buddy (gaze / voice / gesture identity)\n\n\
-             Usage: buckyboi\n\n\
-             Fullscreen X11 overlay. Look at the icosahedron (or click it) to listen\n\
-             if the gate allows. Settings → ID enrolls face, voice, and gestures for\n\
-             one or many people. Profiles stay in ~/.config/buckyboi/ (offline).\n\
-             Esc quits. Native Wayland is not supported.\n\n\
-             Features (cargo): gaze (default), face, hands, voice, voice-sherpa\n\n\
-             Env:\n\
-               DISPLAY                 X11 display (required)\n\
-               BUCKYBOI_LISTEN_MS      override listen duration (ms)\n\
-               BUCKYBOI_GAZE_LOCK_MS   override gaze-follow duration (ms)\n\
-               BUCKYBOI_CAMERA         V4L2 device (default /dev/video0)\n\
-               BUCKYBOI_NO_CAMERA      skip webcam\n\
-               BUCKYBOI_GAZE_SIM       mouse | chase\n\
-               BUCKYBOI_CONFIG         override config dir (tests)\n\
-               BUCKYBOI_MODELS         ONNX model directory\n\
-               BUCKYBOI_FACE_PROBE     weak local face print if no ArcFace model\n\
-               BUCKYBOI_FACE_SIM       synthetic face frames (no camera)\n\
-               BUCKYBOI_VOICE_SIM      tone | file  (no mic)\n\
-               BUCKYBOI_HAND_SIM       fist|palm|thumb|point|peace\n\n\
-             BUDDY_* aliases still work. See README.md."
-        );
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_help();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--wake" || a == "wake") {
+        send_command(WakeCommand::Wake).map_err(|e| e)?;
+        eprintln!("buckyboi: wake sent");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--quit" || a == "quit") {
+        send_command(WakeCommand::Quit).map_err(|e| e)?;
+        eprintln!("buckyboi: quit sent");
         return Ok(());
     }
 
-    if env::var_os("DISPLAY").is_none() {
-        if env::var_os("WAYLAND_DISPLAY").is_some() {
-            eprintln!(
-                "buckyboi: native Wayland has no portable global-input wake.\n\
-                 Start an XWayland session (DISPLAY=:0) or see README.md."
-            );
-            std::process::exit(1);
-        }
-        eprintln!("buckyboi: DISPLAY is unset; need X11. See README.md.");
-        std::process::exit(1);
-    }
+    let mut backend = open_backend()?;
+    let mut wake = WakeBus::bind();
+    let (mut sw, mut sh) = backend.size();
 
-    let (conn, screen_num) = RustConnection::connect(None)?;
-    let setup = conn.setup().clone();
-    let screen = &setup.roots[screen_num];
-    let sw = screen.width_in_pixels;
-    let sh = screen.height_in_pixels;
-    let root = screen.root;
-
-    conn.extension_information(shape::X11_EXTENSION_NAME)?
-        .ok_or("X Shape extension missing")?;
-    conn.xfixes_query_version(5, 0)?.reply()?;
-
-    let (depth, visual) = find_argb_visual(screen).ok_or("no 32-bit ARGB visual")?;
-    let cmap = conn.generate_id()?;
-    conn.create_colormap(ColormapAlloc::NONE, cmap, root, visual)?;
-
-    let win = conn.generate_id()?;
-    let aux = CreateWindowAux::new()
-        .event_mask(
-            EventMask::EXPOSURE
-                | EventMask::STRUCTURE_NOTIFY
-                | EventMask::BUTTON_PRESS
-                | EventMask::BUTTON_RELEASE
-                | EventMask::POINTER_MOTION,
-        )
-        .override_redirect(1)
-        .colormap(cmap)
-        .border_pixel(0)
-        .background_pixel(0);
-    conn.create_window(
-        depth,
-        win,
-        root,
-        0,
-        0,
-        sw,
-        sh,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        visual,
-        &aux,
-    )?;
-    set_dock_hints(&conn, win)?;
-    // Never intercept the desktop until the buddy AABB is known.
-    set_hit_region(&conn, win, &[])?;
-
-    let gc = conn.generate_id()?;
-    conn.create_gc(gc, win, &CreateGCAux::new())?;
-
-    conn.map_window(win)?;
-    conn.configure_window(
-        win,
-        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-    )?;
-    conn.flush()?;
-
-    let esc = escape_keycodes(&conn, &setup);
     let mut state = initial_on(sw as f32, sh as f32);
     let (home_x, home_y) = corner_on(0, state.sw, state.sh);
     state.cx = home_x;
@@ -784,9 +452,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_voice_ms = 0u64;
     let mut last_face_ms = 0u64;
 
-    let mut gaze_drive = match env_or_alias("BUCKYBOI_GAZE_SIM", "BUDDY_GAZE_SIM")
-        .as_deref()
-    {
+    let mut gaze_drive = match env_or_alias("BUCKYBOI_GAZE_SIM", "BUDDY_GAZE_SIM").as_deref() {
         Some("mouse") => {
             eprintln!("buckyboi: GAZE_SIM=mouse — pointer is a stand-in gaze");
             GazeDrive::Mouse
@@ -812,19 +478,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut prev_button = false;
-    let mut last_root = (0i16, 0i16);
-    let mut have_last_root = false;
-    let mut last_keys = [0u8; 32];
-    let mut have_keys = false;
-    let mut prev_rect: Option<(i16, i16, u16, u16)> = None;
     let mut mapped = true;
     let pad = HIT_RADIUS + 28.0;
-    let mut last_raise = Instant::now();
 
     eprintln!(
-        "buckyboi overlay {}x{} — look or click to listen (if gate allows), Esc quits",
-        sw, sh
+        "buckyboi overlay {}x{} ({}) — look or click to listen (if gate allows), Esc quits",
+        sw,
+        sh,
+        backend.name()
     );
+    if backend.kind() == BackendKind::Wayland {
+        eprintln!(
+            "buckyboi: Wayland wake = Hyprland cursor IPC and/or SUPER+B → `buckyboi --wake`.\n\
+             True “any key anywhere” is not portable; see contrib/omarchy/hyprland.conf"
+        );
+    }
     if let Some(ms) = listen_override_ms() {
         eprintln!("BUDDY_LISTEN_MS override → {ms} ms");
     }
@@ -838,38 +506,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let frame = Duration::from_micros(16_666);
+    let mut last_hypr_refresh = Instant::now();
     loop {
         let tick_start = Instant::now();
-        let mut ev_press = false;
-        let mut ev_release = false;
-        let mut ev_xy: Option<(f32, f32)> = None;
-        while let Some(ev) = conn.poll_for_event()? {
-            match ev {
-                Event::Error(e) => eprintln!("X error: {e:?}"),
-                Event::ButtonPress(e) if e.detail == 1 => {
-                    ev_press = true;
-                    ev_xy = Some((e.root_x as f32, e.root_y as f32));
-                }
-                Event::ButtonRelease(e) if e.detail == 1 => {
-                    ev_release = true;
-                    ev_xy = Some((e.root_x as f32, e.root_y as f32));
-                }
-                Event::MotionNotify(e) => {
-                    ev_xy = Some((e.root_x as f32, e.root_y as f32));
-                }
-                _ => {}
-            }
+        let (nw, nh) = backend.size();
+        if nw != sw || nh != sh {
+            sw = nw;
+            sh = nh;
+            state.sw = sw as f32;
+            state.sh = sh as f32;
         }
 
-        let ptr = conn.query_pointer(root)?.reply()?;
-        let mx = ev_xy.map(|(x, _)| x).unwrap_or(ptr.root_x as f32);
-        let my = ev_xy.map(|(_, y)| y).unwrap_or(ptr.root_y as f32);
-        // QueryPointer can miss a <16 ms click; ButtonPress/Release on the
-        // shaped hit region cannot. OR them so short taps still count.
-        let button = ptr.mask.contains(KeyButMask::BUTTON1) || (ev_press && !ev_release);
-        let keys = conn.query_keymap()?.reply()?.keys;
+        let mut input: FrameInput = backend.poll_input()?;
+        let hidden = ux.phase == Phase::Hidden;
+        if last_hypr_refresh.elapsed() > Duration::from_secs(5) {
+            wake.refresh_hypr_monitor();
+            last_hypr_refresh = Instant::now();
+        }
+        let (wake_now, quit_now, hypr_xy) =
+            wake.drain(hidden || backend.kind() == BackendKind::Wayland);
+        if quit_now {
+            input.quit = true;
+        }
+        if wake_now {
+            input.wake = true;
+        }
+        if let Some((hx, hy)) = hypr_xy {
+            // Global cursor (Hyprland) for mouse-avoid + hidden wake.
+            if !input.ev_press && !input.ev_release {
+                input.mx = hx;
+                input.my = hy;
+            }
+        }
+        if input.quit {
+            break;
+        }
 
-        if any_escape(&keys, &esc) {
+        let mx = input.ev_xy.map(|(x, _)| x).unwrap_or(input.mx);
+        let my = input.ev_xy.map(|(_, y)| y).unwrap_or(input.my);
+        let button = input.button;
+        let ev_press = input.ev_press;
+        let ev_release = input.ev_release;
+
+        if input.escape {
             break;
         }
 
@@ -888,39 +567,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             finish_enroll(&mut enroll, &mut profiles, &mut settings);
         }
         if matches!(enroll.phase, EnrollPhase::Idle) {
-        if let Some(gact) = maybe_gesture_action(now, &profiles, &auth, &settings, &mut last_hand_ms)
-        {
-            match gact {
-                GestureAction::Listen if ux.phase == Phase::VisibleIdle => {
-                    if auth.allows_listen(settings.gate, now) {
-                        let listen_ms = listen_override_ms().unwrap_or(settings.listen_ms as u64);
-                        ux.enter_listen_for(now, listen_ms);
-                        menu.reset();
-                        gaze_lock.reset();
-                        eprintln!("buckyboi: listening… (gesture palm)");
+            if let Some(gact) =
+                maybe_gesture_action(now, &profiles, &auth, &settings, &mut last_hand_ms)
+            {
+                match gact {
+                    GestureAction::Listen if ux.phase == Phase::VisibleIdle => {
+                        if auth.allows_listen(settings.gate, now) {
+                            let listen_ms =
+                                listen_override_ms().unwrap_or(settings.listen_ms as u64);
+                            ux.enter_listen_for(now, listen_ms);
+                            menu.reset();
+                            gaze_lock.reset();
+                            eprintln!("buckyboi: listening… (gesture palm)");
+                        }
                     }
+                    GestureAction::Dismiss => {
+                        ux.phase = Phase::Hidden;
+                        eprintln!("buckyboi: dismiss (gesture)");
+                    }
+                    GestureAction::Settings if ux.phase == Phase::Listening => {
+                        menu.settings_open = !menu.settings_open;
+                    }
+                    GestureAction::Mute => {
+                        menu.muted = !menu.muted;
+                        eprintln!("buckyboi: mute → {}", menu.muted);
+                    }
+                    GestureAction::Info => {
+                        eprintln!(
+                            "buckyboi: {} via {}",
+                            auth.state.label(now),
+                            settings.gate.label()
+                        );
+                    }
+                    _ => {}
                 }
-                GestureAction::Dismiss => {
-                    ux.phase = Phase::Hidden;
-                    eprintln!("buckyboi: dismiss (gesture)");
-                }
-                GestureAction::Settings if ux.phase == Phase::Listening => {
-                    menu.settings_open = !menu.settings_open;
-                }
-                GestureAction::Mute => {
-                    menu.muted = !menu.muted;
-                    eprintln!("buckyboi: mute → {}", menu.muted);
-                }
-                GestureAction::Info => {
-                    eprintln!(
-                        "buckyboi: {} via {}",
-                        auth.state.label(now),
-                        settings.gate.label()
-                    );
-                }
-                _ => {}
             }
-        }
         }
         let mut gaze_pt: Option<(f32, f32)> = None;
         match &gaze_drive {
@@ -935,18 +616,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gaze_pt = Some(gaze_smooth.push(mx, my, now));
             }
             GazeDrive::Chase { origin_ms } => {
-                let (gx, gy) = chase_gaze(now, *origin_ms, state.cx, state.cy, sw as f32, sh as f32);
+                let (gx, gy) =
+                    chase_gaze(now, *origin_ms, state.cx, state.cy, sw as f32, sh as f32);
                 gaze_pt = Some(gaze_smooth.push(gx, gy, now));
             }
         }
 
         match ux.phase {
             Phase::Hidden => {
-                let moved = have_last_root
-                    && ((ptr.root_x - last_root.0).abs() >= 1
-                        || (ptr.root_y - last_root.1).abs() >= 1);
-                let keyed = have_keys && keys != last_keys;
-                if moved || keyed {
+                if input.wake {
                     let _ = ux.wake();
                     menu.reset();
                     gaze_lock = match gaze_lock_override_ms() {
@@ -958,11 +636,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         *origin_ms = now;
                     }
                     eprintln!("buckyboi: wake");
-                    conn.map_window(win)?;
-                    conn.configure_window(
-                        win,
-                        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-                    )?;
+                    backend.show()?;
                     mapped = true;
                 }
             }
@@ -1020,8 +694,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     auth.state.label(now)
                                 );
                             } else {
-                                let listen_ms = listen_override_ms()
-                                    .unwrap_or(settings.listen_ms as u64);
+                                let listen_ms =
+                                    listen_override_ms().unwrap_or(settings.listen_ms as u64);
                                 ux.enter_listen_for(now, listen_ms);
                                 menu.reset();
                                 gaze_lock.reset();
@@ -1100,7 +774,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             save_settings(&settings);
                             if settings.camera {
-                                if !matches!(gaze_drive, GazeDrive::Mouse | GazeDrive::Chase { .. }) {
+                                if !matches!(gaze_drive, GazeDrive::Mouse | GazeDrive::Chase { .. })
+                                {
                                     gaze_drive = match camera::start(sw as f32, sh as f32) {
                                         Some(rx) => GazeDrive::Camera(rx),
                                         None => GazeDrive::Off,
@@ -1140,12 +815,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if ux.phase == Phase::Hidden {
                     menu.reset();
-                    eprintln!("buckyboi: hidden (move the mouse or press a key to return)");
-                    if let Some((x, y, w, h)) = prev_rect.take() {
-                        let _ = clear_rect(&conn, win, gc, x, y, w, h);
-                    }
-                    let _ = set_hit_region(&conn, win, &[]);
-                    conn.unmap_window(win)?;
+                    let hint = if backend.kind() == BackendKind::Wayland {
+                        "move the mouse (Hyprland IPC) or SUPER+B / `buckyboi --wake`"
+                    } else {
+                        "move the mouse or press a key to return"
+                    };
+                    eprintln!("buckyboi: hidden ({hint})");
+                    backend.hide()?;
                     mapped = false;
                 }
             }
@@ -1154,21 +830,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if mapped && ux.phase != Phase::Hidden {
             let listening = ux.phase == Phase::Listening;
             let bounds = overlay_bounds(
-                state.cx,
-                state.cy,
-                pad,
-                listening,
-                &menu,
-                now,
-                sw as f32,
-                sh as f32,
+                state.cx, state.cy, pad, listening, &menu, now, sw as f32, sh as f32,
             );
             let rect = bounds_rect(bounds, sw, sh);
-            if let Some(old) = prev_rect {
-                if old != rect {
-                    clear_rect(&conn, win, gc, old.0, old.1, old.2, old.3)?;
-                }
-            }
             let pulse = if listening {
                 0.5 + 0.5 * ((now as f32 / 280.0).sin())
             } else {
@@ -1180,63 +844,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0.0
             };
             let hud = hud_from(&auth, &profiles, &settings, &enroll, now);
-            paint_buddy(
-                &conn,
-                win,
-                gc,
-                &state,
-                listening,
-                pulse,
-                dwell,
-                &menu,
-                &settings,
-                &hud,
-                mx,
-                my,
-                now,
-                sw as f32,
-                sh as f32,
-                rect,
-            )?;
-            let hits = hit_rects(
-                state.cx,
-                state.cy,
-                pad,
-                listening,
-                &menu,
-                now,
-                sw as f32,
-                sh as f32,
+            let pixels = paint_rect(
+                &state, listening, pulse, dwell, &menu, &settings, &hud, mx, my, now, sw as f32,
+                sh as f32, rect,
             );
-            set_hit_region(&conn, win, &hits)?;
-            prev_rect = Some(rect);
-            if last_raise.elapsed() > Duration::from_secs(2) {
-                conn.configure_window(
-                    win,
-                    &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-                )?;
-                last_raise = Instant::now();
-            }
+            let hits = hit_rects(
+                state.cx, state.cy, pad, listening, &menu, now, sw as f32, sh as f32,
+            );
+            backend.present(&pixels, rect, &hits)?;
         }
 
-        last_root = (ptr.root_x, ptr.root_y);
-        have_last_root = true;
-        last_keys = keys;
-        have_keys = true;
         prev_button = button;
-        conn.flush()?;
+        backend.flush()?;
 
         let spent = tick_start.elapsed();
-        if let Some(rest) = frame.checked_sub(spent) {
-            // Drain without blocking input for long.
-            std::thread::sleep(rest.min(Duration::from_millis(8)));
+        let budget = if ux.phase == Phase::Hidden {
+            Duration::from_millis(40)
+        } else {
+            frame
+        };
+        if let Some(rest) = budget.checked_sub(spent) {
+            std::thread::sleep(rest.min(Duration::from_millis(16)));
         }
     }
 
-    let _ = set_hit_region(&conn, win, &[]);
-    conn.unmap_window(win)?;
-    conn.destroy_window(win)?;
-    conn.flush()?;
+    backend.shutdown()?;
     eprintln!("buckyboi: quit");
     Ok(())
 }

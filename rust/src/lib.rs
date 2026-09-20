@@ -1,6 +1,7 @@
 //! buckyboi: overlay simulation, UX, gaze, and local identity.
 
 pub mod camera;
+pub mod display;
 pub mod draw;
 pub mod gaze;
 pub mod identity;
