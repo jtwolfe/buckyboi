@@ -2,7 +2,7 @@
 //! Opening the device is best-effort: failure returns `None` and the overlay
 //! keeps mouse-avoid + click-to-listen.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -21,8 +21,6 @@ pub struct CamFrame {
     pub t_ms: u64,
 }
 
-/// Camera loop checks each frame; `true` → camera is off. Not `CamGaze` disconnect.
-pub static CAM_STOP: AtomicBool = AtomicBool::new(false);
 /// Generation captured at spawn; the loop breaks if this no longer matches.
 static CAM_EPOCH: AtomicU64 = AtomicU64::new(0);
 
@@ -50,7 +48,6 @@ pub fn clear_frame() {
 
 /// Invalidate the running capture thread and drop the RGB slot.
 pub fn request_stop() {
-    CAM_STOP.store(true, Ordering::SeqCst);
     CAM_EPOCH.fetch_add(1, Ordering::SeqCst);
     clear_frame();
 }
@@ -63,7 +60,6 @@ pub fn start(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
         return None;
     }
     let my_epoch = CAM_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
-    CAM_STOP.store(false, Ordering::SeqCst);
     #[cfg(feature = "gaze")]
     {
         start_v4l(screen_w, screen_h, my_epoch)
@@ -71,7 +67,7 @@ pub fn start(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
     #[cfg(not(feature = "gaze"))]
     {
         let _ = (screen_w, screen_h, my_epoch);
-        CAM_STOP.store(true, Ordering::SeqCst);
+        clear_frame();
         eprintln!("buckyboi: compiled without `gaze` feature — no webcam");
         None
     }
@@ -225,6 +221,9 @@ fn start_v4l(screen_w: f32, screen_h: f32, my_epoch: u64) -> Option<Receiver<Cam
                     continue;
                 }
                 let rgb: Arc<[u8]> = Arc::from(rgb);
+                if CAM_EPOCH.load(Ordering::SeqCst) != my_epoch {
+                    break;
+                }
                 store_frame(CamFrame {
                     rgb: Arc::clone(&rgb),
                     w: fw,
@@ -261,7 +260,6 @@ fn start_v4l(screen_w: f32, screen_h: f32, my_epoch: u64) -> Option<Receiver<Cam
     {
         eprintln!("buckyboi: could not spawn camera thread — no gaze");
         if CAM_EPOCH.load(Ordering::SeqCst) == my_epoch {
-            CAM_STOP.store(true, Ordering::SeqCst);
             clear_frame();
         }
         return None;
@@ -324,7 +322,6 @@ mod tests {
         });
         let before = CAM_EPOCH.load(Ordering::SeqCst);
         request_stop();
-        assert!(CAM_STOP.load(Ordering::SeqCst));
         assert!(CAM_EPOCH.load(Ordering::SeqCst) > before);
         assert!(latest_frame().is_none());
     }

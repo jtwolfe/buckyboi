@@ -331,7 +331,6 @@ fn vision_loop() {
             std::thread::sleep(Duration::from_millis(rest));
         }
     }
-    VISION_WORKER.store(false, Ordering::SeqCst);
 }
 
 #[cfg(test)]
