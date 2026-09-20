@@ -142,7 +142,10 @@ impl EnrollSession {
     }
 
     pub fn begin_capture(&mut self) {
-        if matches!(self.phase, EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }) {
+        if matches!(
+            self.phase,
+            EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+        ) {
             return;
         }
         self.phase = EnrollPhase::Capturing {
@@ -168,10 +171,7 @@ impl EnrollSession {
             self.last_reject = Some(quality.reject.hint().into());
             if self.rejects > 40 {
                 self.phase = EnrollPhase::Failed {
-                    reason: self
-                        .last_reject
-                        .clone()
-                        .unwrap_or_else(|| "NO FACE".into()),
+                    reason: self.last_reject.clone().unwrap_or_else(|| "NO FACE".into()),
                 };
                 return EnrollEvent::Failed;
             }
@@ -282,7 +282,9 @@ impl EnrollSession {
             EnrollPhase::Prompt { kind, gesture, .. } => match kind {
                 EnrollKind::Face => "LOOK AT CAM".into(),
                 EnrollKind::Voice => "SAY PHRASE".into(),
-                EnrollKind::Gesture => format!("HOLD {}", gesture.unwrap_or(GestureClass::Palm).label()),
+                EnrollKind::Gesture => {
+                    format!("HOLD {}", gesture.unwrap_or(GestureClass::Palm).label())
+                }
             },
             EnrollPhase::Capturing {
                 kind,
@@ -341,16 +343,24 @@ mod tests {
             ok: false,
             ..ok_face()
         };
-        assert_eq!(s.push_face(bad, Some(Embedding::new("arcface", vec![1.0, 0.0]))), EnrollEvent::Rejected);
+        assert_eq!(
+            s.push_face(bad, Some(Embedding::new("arcface", vec![1.0, 0.0]))),
+            EnrollEvent::Rejected
+        );
         for i in 0..FACE_ENROLL_NEED {
-            let ev = s.push_face(ok_face(), Some(Embedding::new("arcface", vec![1.0, i as f32 * 0.01])));
+            let ev = s.push_face(
+                ok_face(),
+                Some(Embedding::new("arcface", vec![1.0, i as f32 * 0.01])),
+            );
             if i + 1 < FACE_ENROLL_NEED {
                 assert_eq!(ev, EnrollEvent::Accepted);
             } else {
                 assert_eq!(ev, EnrollEvent::Finished);
             }
         }
-        assert!(matches!(s.phase, EnrollPhase::Done { accepted, .. } if accepted == FACE_ENROLL_NEED));
+        assert!(
+            matches!(s.phase, EnrollPhase::Done { accepted, .. } if accepted == FACE_ENROLL_NEED)
+        );
     }
 
     #[test]
@@ -362,7 +372,10 @@ mod tests {
             ok: false,
             reject: crate::identity::voice::VoiceReject::TooShort,
         };
-        assert_eq!(s.push_voice(quiet, Some(Embedding::new("logmel", vec![1.0; 8]))), EnrollEvent::Rejected);
+        assert_eq!(
+            s.push_voice(quiet, Some(Embedding::new("logmel", vec![1.0; 8]))),
+            EnrollEvent::Rejected
+        );
         assert_eq!(s.hint(), "TOO SHORT");
     }
 

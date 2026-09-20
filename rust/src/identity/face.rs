@@ -151,7 +151,8 @@ pub fn find_rec_model() -> Option<std::path::PathBuf> {
 /// Env override wins; else model-aware default when `configured` is still
 /// the compiled default; else the stored value.
 pub fn effective_face_threshold(configured: f32, model_name: Option<&str>) -> f32 {
-    if let Some(v) = crate::identity::env_or_alias("BUCKYBOI_FACE_THRESHOLD", "BUDDY_FACE_THRESHOLD")
+    if let Some(v) =
+        crate::identity::env_or_alias("BUCKYBOI_FACE_THRESHOLD", "BUDDY_FACE_THRESHOLD")
     {
         if let Ok(n) = v.parse::<f32>() {
             return n.clamp(0.15, 0.95);
@@ -178,11 +179,7 @@ pub fn laplacian_var(gray: &[f32], w: usize, h: usize) -> f32 {
     for y in 1..h - 1 {
         for x in 1..w - 1 {
             let i = y * w + x;
-            let l = -4.0 * gray[i]
-                + gray[i - 1]
-                + gray[i + 1]
-                + gray[i - w]
-                + gray[i + w];
+            let l = -4.0 * gray[i] + gray[i - 1] + gray[i + 1] + gray[i - w] + gray[i + w];
             sum += l as f64;
             sum2 += (l as f64) * (l as f64);
             n += 1.0;
@@ -214,7 +211,13 @@ fn brightness(gray: &[f32]) -> f32 {
     gray.iter().sum::<f32>() / gray.len() as f32
 }
 
-fn quality_from_crop(rgb112: &[u8], bbox: FaceBox, frame_w: u32, frame_h: u32, faces: u32) -> FaceQuality {
+fn quality_from_crop(
+    rgb112: &[u8],
+    bbox: FaceBox,
+    frame_w: u32,
+    frame_h: u32,
+    faces: u32,
+) -> FaceQuality {
     let area_frac = (bbox.w * bbox.h) / (frame_w as f32 * frame_h as f32).max(1.0);
     let gray = rgb_to_gray(rgb112);
     let side = ((gray.len() as f32).sqrt()) as usize;
@@ -416,7 +419,10 @@ mod onnx {
             name,
             face_cosine_threshold(&name)
         );
-        *g = Some(Rec { session: sess, name });
+        *g = Some(Rec {
+            session: sess,
+            name,
+        });
         Some(())
     }
 

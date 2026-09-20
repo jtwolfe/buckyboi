@@ -5,10 +5,11 @@ use buckyboi::display::{
     bounds_rect, open_backend, paint_rect, send_command, BackendKind, FrameInput, WakeBus,
     WakeCommand,
 };
-use buckyboi::identity::{
-    env_flag, env_flag_alias, env_or_alias, extract_face, hands, latest_look, voice, VISION_INFER_MS,
-};
 use buckyboi::face_to_screen;
+use buckyboi::identity::{
+    env_flag, env_flag_alias, env_or_alias, extract_face, hands, latest_look, voice,
+    VISION_INFER_MS,
+};
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
     initial_on, load_settings, overlay_bounds, save_settings, spin, step_overlay_avoid,
@@ -617,13 +618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Some(look) = latest_look(now, 220) {
                     let (sx, sy) = face_to_screen(
-                        look.cx,
-                        look.cy,
-                        look.fw,
-                        look.fh,
-                        sw as f32,
-                        sh as f32,
-                        true,
+                        look.cx, look.cy, look.fw, look.fh, sw as f32, sh as f32, true,
                     );
                     gaze_pt = Some(gaze_smooth.push(sx, sy, now));
                 } else {

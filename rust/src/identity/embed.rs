@@ -145,7 +145,11 @@ mod tests {
     fn match_picks_highest_over_threshold() {
         let probe = e("arcface", vec![1.0, 0.0]);
         let gal = vec![
-            ("p1".into(), "Ada".into(), vec![e("arcface", vec![0.95, 0.05])]),
+            (
+                "p1".into(),
+                "Ada".into(),
+                vec![e("arcface", vec![0.95, 0.05])],
+            ),
             ("p2".into(), "Bo".into(), vec![e("arcface", vec![0.2, 0.9])]),
         ];
         let hit = best_match(&probe, &gal, 0.5).unwrap();

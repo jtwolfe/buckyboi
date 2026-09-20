@@ -80,7 +80,12 @@ fn sigmoid(x: f32) -> f32 {
 
 /// Decode one palm. `reg` is 18 floats (dx,dy,w,h + 7 keypoints) in
 /// **input-pixel** offset form used by MediaPipe / OpenCV zoo.
-pub fn decode_palm_box(reg: &[f32], score_logit: f32, anchor: Anchor, input: f32) -> Option<PalmDet> {
+pub fn decode_palm_box(
+    reg: &[f32],
+    score_logit: f32,
+    anchor: Anchor,
+    input: f32,
+) -> Option<PalmDet> {
     if reg.len() < 18 {
         return None;
     }
@@ -115,8 +120,12 @@ pub fn decode_palms(
     let n = scores.len().min(anchors.len()).min(regressors.len() / 18);
     let mut out = Vec::new();
     for i in 0..n {
-        let det = match decode_palm_box(&regressors[i * 18..i * 18 + 18], scores[i], anchors[i], input)
-        {
+        let det = match decode_palm_box(
+            &regressors[i * 18..i * 18 + 18],
+            scores[i],
+            anchors[i],
+            input,
+        ) {
             Some(d) => d,
             None => continue,
         };
@@ -124,7 +133,11 @@ pub fn decode_palms(
             out.push(det);
         }
     }
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
@@ -187,7 +200,11 @@ pub fn roi_to_frame(roi: HandRoi, out: f32, x: f32, y: f32) -> (f32, f32) {
 }
 
 pub fn nms_palms(mut dets: Vec<PalmDet>, thresh: f32) -> Vec<PalmDet> {
-    dets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    dets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut keep = Vec::new();
     let mut skip = vec![false; dets.len()];
     for i in 0..dets.len() {
@@ -267,6 +284,9 @@ mod tests {
         };
         let crop = warp_roi_rgb(&rgb, 32, 32, roi, 8);
         let mid = (4 * 8 + 4) * 3;
-        assert!(crop[mid] > 100, "center of ROI should hit the painted pixel");
+        assert!(
+            crop[mid] > 100,
+            "center of ROI should hit the painted pixel"
+        );
     }
 }

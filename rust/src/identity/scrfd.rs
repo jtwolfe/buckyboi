@@ -189,7 +189,11 @@ fn iou(a: &FaceBox, b: &FaceBox) -> f32 {
 }
 
 pub fn nms(mut faces: Vec<DetectedFace>, thresh: f32) -> Vec<DetectedFace> {
-    faces.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    faces.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut keep = Vec::new();
     let mut suppressed = vec![false; faces.len()];
     for i in 0..faces.len() {
@@ -207,7 +211,11 @@ pub fn nms(mut faces: Vec<DetectedFace>, thresh: f32) -> Vec<DetectedFace> {
 }
 
 /// InsightFace default: `area − 2 · offset_dist²`. Largest / most central wins.
-pub fn pick_primary_face(faces: &[DetectedFace], frame_w: f32, frame_h: f32) -> Option<DetectedFace> {
+pub fn pick_primary_face(
+    faces: &[DetectedFace],
+    frame_w: f32,
+    frame_h: f32,
+) -> Option<DetectedFace> {
     if faces.is_empty() {
         return None;
     }
@@ -500,7 +508,8 @@ mod tests {
             kps: None,
             score: 0.7,
         };
-        let pick = pick_primary_face(&[small_center, large_edge, large_center], 100.0, 100.0).unwrap();
+        let pick =
+            pick_primary_face(&[small_center, large_edge, large_center], 100.0, 100.0).unwrap();
         assert!((pick.bbox.x - 35.0).abs() < 1e-3);
     }
 

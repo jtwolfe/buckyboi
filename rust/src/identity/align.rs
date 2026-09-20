@@ -38,7 +38,10 @@ impl Similarity {
     }
 
     pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
-        (self.a * x - self.b * y + self.tx, self.b * x + self.a * y + self.ty)
+        (
+            self.a * x - self.b * y + self.tx,
+            self.b * x + self.a * y + self.ty,
+        )
     }
 
     /// Inverse map (dest → src) for backward warping.
@@ -49,7 +52,10 @@ impl Similarity {
         }
         let dx = xp - self.tx;
         let dy = yp - self.ty;
-        ((self.a * dx + self.b * dy) / det, (-self.b * dx + self.a * dy) / det)
+        (
+            (self.a * dx + self.b * dy) / det,
+            (-self.b * dx + self.a * dy) / det,
+        )
     }
 }
 
@@ -188,7 +194,12 @@ pub fn warp_affine_rgb(
 }
 
 /// InsightFace `norm_crop`: 112×112 RGB aligned to `arcface_dst`.
-pub fn norm_crop_arcface(rgb: &[u8], w: u32, h: u32, landmarks: &[(f32, f32); 5]) -> Option<Vec<u8>> {
+pub fn norm_crop_arcface(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    landmarks: &[(f32, f32); 5],
+) -> Option<Vec<u8>> {
     let m = estimate_arcface_norm(landmarks, ARCFACE_SIZE)?;
     Some(warp_affine_rgb(rgb, w, h, m, ARCFACE_SIZE, ARCFACE_SIZE))
 }
@@ -264,7 +275,10 @@ mod tests {
     #[test]
     fn scale_and_translate() {
         let src = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)];
-        let dst: Vec<(f32, f32)> = src.iter().map(|(x, y)| (x * 2.0 + 3.0, y * 2.0 - 1.0)).collect();
+        let dst: Vec<(f32, f32)> = src
+            .iter()
+            .map(|(x, y)| (x * 2.0 + 3.0, y * 2.0 - 1.0))
+            .collect();
         let m = estimate_similarity(&src, &dst).unwrap();
         assert!((m.a - 2.0).abs() < 1e-5, "{m:?}");
         assert!(m.b.abs() < 1e-5, "{m:?}");

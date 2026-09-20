@@ -94,7 +94,8 @@ pub fn pick_speaker_model(dir: &Path) -> Option<PathBuf> {
 }
 
 pub fn voice_cosine_threshold(model_name: Option<&str>) -> f32 {
-    if let Some(v) = crate::identity::env_or_alias("BUCKYBOI_VOICE_THRESHOLD", "BUDDY_VOICE_THRESHOLD")
+    if let Some(v) =
+        crate::identity::env_or_alias("BUCKYBOI_VOICE_THRESHOLD", "BUDDY_VOICE_THRESHOLD")
     {
         if let Ok(n) = v.parse::<f32>() {
             return n.clamp(0.20, 0.95);
@@ -300,7 +301,8 @@ pub mod capture {
                         cpal::SampleFormat::I16 => dev.build_input_stream(
                             &cfg.config(),
                             move |data: &[i16], _| {
-                                let f: Vec<f32> = data.iter().map(|s| *s as f32 / 32768.0).collect();
+                                let f: Vec<f32> =
+                                    data.iter().map(|s| *s as f32 / 32768.0).collect();
                                 let mono = to_mono_16k(&f, ch, src_rate);
                                 if let Ok(mut g) = buf2.lock() {
                                     g.extend_from_slice(&mono);
@@ -398,7 +400,8 @@ mod tests {
         let n = VOICE_SAMPLE_RATE * ms / 1000;
         (0..n)
             .map(|i| {
-                amp * (2.0 * std::f32::consts::PI * freq * i as f32 / VOICE_SAMPLE_RATE as f32).sin()
+                amp * (2.0 * std::f32::consts::PI * freq * i as f32 / VOICE_SAMPLE_RATE as f32)
+                    .sin()
             })
             .collect()
     }

@@ -432,7 +432,11 @@ mod onnx {
                 }
                 let (r, g, b) = (rgb[i] as f32, rgb[i + 1] as f32, rgb[i + 2] as f32);
                 let (nr, ng, nb) = if scale_127 {
-                    ((r - 127.5) / 127.5, (g - 127.5) / 127.5, (b - 127.5) / 127.5)
+                    (
+                        (r - 127.5) / 127.5,
+                        (g - 127.5) / 127.5,
+                        (b - 127.5) / 127.5,
+                    )
                 } else {
                     (r / 255.0, g / 255.0, b / 255.0)
                 };
@@ -454,7 +458,10 @@ mod onnx {
         v
     }
 
-    fn landmarks_from_flat(data: &[f32], roi: Option<crate::identity::palm::HandRoi>) -> Option<HandLandmarks> {
+    fn landmarks_from_flat(
+        data: &[f32],
+        roi: Option<crate::identity::palm::HandRoi>,
+    ) -> Option<HandLandmarks> {
         if data.len() < 42 {
             return None;
         }
@@ -601,7 +608,10 @@ mod tests {
     #[test]
     fn unknown_below_threshold() {
         let fist = synthetic(GestureClass::Fist).normalized();
-        let cents = vec![(GestureClass::Palm, synthetic(GestureClass::Palm).normalized())];
+        let cents = vec![(
+            GestureClass::Palm,
+            synthetic(GestureClass::Palm).normalized(),
+        )];
         let hand = HandLandmarks::from_flat(&fist).unwrap_or(synthetic(GestureClass::Fist));
         // Use a real fist hand against a palm-only gallery.
         let fist_hand = synthetic(GestureClass::Fist);
