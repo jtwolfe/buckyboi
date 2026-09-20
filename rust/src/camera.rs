@@ -276,6 +276,7 @@ fn start_v4l(screen_w: f32, screen_h: f32, my_epoch: u64) -> Option<Receiver<Cam
         }
         Err(_) => {
             eprintln!("buckyboi: camera timed out opening — mouse-avoid + click-to-listen");
+            request_stop();
             None
         }
     }
