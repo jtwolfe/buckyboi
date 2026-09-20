@@ -44,7 +44,8 @@ calendar estimates.
 ## G — Biometric quality (this tree)
 
 - SCRFD `det_10g` → 5-point `norm_crop` → ArcFace (bbox crop only if no landmarks).
-- Gaze look-target from the SCRFD box when a detection is fresh.
+- Gaze look-target from the SCRFD box when a detection is fresh
+  (superseded for iris by **J** when the landmarker file is present).
 - English sherpa speaker default; log-mel fallback; `voice` folds sherpa-onnx.
 - Real palm + landmark ONNX when `--features hands` and models exist.
 - Vision ONNX throttled to ~12.5 Hz; Settings ID shows TOO DARK / BLURRY / …
@@ -65,6 +66,12 @@ calendar estimates.
 Owner must clear GitHub Actions billing if runners were previously
 refused (spending limit). Workflows do not fix that.
 
+## J — Calibrated webcam gaze (this tree)
+
+- 478-pt Face Landmarker (iris 468/473) folded into `--features face`.
+- 5-point overlay calib (inset 10%); `gaze_calib.json`; face-box fallback.
+- Honest claim: **~3–6° / buddy-hit**, not a research tracker. No PnP / L2CS.
+
 ## Next (not blocking)
 
 - Multi-output follow (one layer per head, or follow the focused output).
@@ -79,5 +86,6 @@ refused (spending limit). Workflows do not fix that.
 - Hidden wake on Wayland is Hyprland IPC + a hotkey / socket — not
   “any key anywhere”.
 - Face / voice prints here are **not** a commercial biometric. Thresholds fail closed; expect false rejects in bad light / noise.
+- Webcam gaze is a **look-target** (~3–6° after calib). Not IR, not reading-gaze.
 - Cloud agent VMs usually have **no camera and no mic**. Use the `*_SIM` env vars and unit tests.
 - `ort` / `sherpa-onnx` add compile time and download native libs — keep them off default features.

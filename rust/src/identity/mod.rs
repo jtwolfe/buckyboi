@@ -8,6 +8,9 @@ pub mod embed;
 pub mod enroll;
 pub mod face;
 pub mod gate;
+pub mod gaze_calib;
+#[cfg(feature = "face")]
+pub mod gaze_track;
 pub mod hands;
 #[cfg(any(feature = "face", feature = "hands"))]
 pub(crate) mod ort_sess;
@@ -26,6 +29,10 @@ pub use face::{
     FACE_KIND_ARCFACE_R50, FACE_KIND_PROBE, FACE_THRESHOLD_MBF, FACE_THRESHOLD_R50,
 };
 pub use gate::*;
+pub use gaze_calib::{
+    calib_point_count, camera_label, dot_pos, from_affine, from_ridge, look_hint, CalibEvent,
+    CalibFeat, CalibObs, GazeCalib, GazeCalibSession,
+};
 pub use hands::{
     classify_gesture, classify_rules, classify_trained, extract_status, gesture_centroid,
     models_present, GestureAction, GestureClass, GestureMap, GestureSample, HandLandmarks,
@@ -39,9 +46,9 @@ pub use voice::{
 };
 pub use wizard::{skip_on_enroll_fail, FirstRunWizard, WizardEvent, WizardStep, LARGEST_FACE_CHIP};
 pub use worker::{
-    latest_face, latest_hand, latest_voice, publishing_gaze, reload_rec, set_enrolling,
-    set_gallery_kinds, set_screen, start_vision_worker, watch_vision_worker, FaceSnap, HandSnap,
-    VoiceSnap,
+    clear_gaze, latest_face, latest_gaze, latest_hand, latest_voice, publishing_gaze, set_calib,
+    set_enrolling, set_screen, start_vision_worker, watch_vision_worker, FaceSnap, GazeKind,
+    GazeSnap, HandSnap, VoiceSnap,
 };
 
 /// Vision / identity ONNX cadence (~12.5 Hz) so the overlay stays at 60 Hz.

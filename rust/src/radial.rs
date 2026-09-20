@@ -61,6 +61,9 @@ pub enum RadialAction {
     WizardSkip,
     WizardCancel,
     WizardAddAnother,
+    StartGazeCalib,
+    CancelGazeCalib,
+    SkipGazeCalib,
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +123,9 @@ pub struct IdentityHud {
     pub wizard_can_next: bool,
     pub wizard_can_add: bool,
     pub face_chip: String,
+    pub gaze_calib_open: bool,
+    pub gaze_calib_hint: String,
+    pub gaze_calib_progress: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +137,7 @@ pub struct RadialMenu {
     pub flash_until_ms: u64,
     pub dragging_slider: Option<Slider>,
     pub freeze_ms: Option<u64>,
+    pub calib_open: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,6 +157,7 @@ impl RadialMenu {
             flash_until_ms: 0,
             dragging_slider: None,
             freeze_ms: None,
+            calib_open: false,
         }
     }
 
@@ -159,11 +167,12 @@ impl RadialMenu {
         self.flash_id = None;
         self.dragging_slider = None;
         self.freeze_ms = None;
+        self.calib_open = false;
     }
 
-    /// Settings or first-run wizard — hide-timer pauses, orbit freezes.
+    /// Settings, first-run wizard, or gaze calib — hide-timer pauses.
     pub fn panel_open(&self) -> bool {
-        self.settings_open || self.wizard_open
+        self.settings_open || self.wizard_open || self.calib_open
     }
 
     pub fn layout_ms(&self, now_ms: u64) -> u64 {
@@ -326,6 +335,16 @@ pub(crate) fn wizard_add_hit(px: f32, py: f32) -> (f32, f32, f32, f32) {
     new_btn(px, py)
 }
 
+/// CALIB row under the three Look-tab sliders (do not squeeze next to CAM/GATE).
+pub(crate) fn calib_hit(px: f32, py: f32) -> (f32, f32, f32, f32) {
+    (px + 10.0, py + 92.0 + 3.0 * 28.0 + 8.0, 70.0, 16.0)
+}
+
+/// SKIP / CANCEL discs sit just under the buddy during calib (17 px).
+pub fn calib_chip_centers(cx: f32, cy: f32) -> ((f32, f32), (f32, f32)) {
+    ((cx - 48.0, cy + 118.0), (cx + 48.0, cy + 118.0))
+}
+
 fn in_rect(mx: f32, my: f32, x: f32, y: f32, w: f32, h: f32) -> bool {
     mx >= x && my >= y && mx <= x + w && my <= y + h
 }
@@ -475,6 +494,10 @@ pub fn hit_panel_ex(
     ) {
         return RadialAction::SetStroke(slider_value(mx, stroke, 0.8, 3.0));
     }
+    let calib = calib_hit(px, py);
+    if in_rect(mx, my, calib.0, calib.1, calib.2, calib.3) {
+        return RadialAction::StartGazeCalib;
+    }
     if in_rect(mx, my, px, py, PANEL_W, PANEL_H) {
         return RadialAction::None;
     }
@@ -553,6 +576,9 @@ pub fn apply_action(
         | RadialAction::WizardSkip
         | RadialAction::WizardCancel
         | RadialAction::WizardAddAnother
+        | RadialAction::StartGazeCalib
+        | RadialAction::CancelGazeCalib
+        | RadialAction::SkipGazeCalib
         | RadialAction::None => {}
     }
 }
@@ -607,7 +633,17 @@ pub fn click_listening_ex(
     wizard: Option<WizardHits>,
 ) -> RadialAction {
     let centers = icon_centers(cx, cy, menu.layout_ms(now_ms), true);
-    if menu.panel_open() {
+    if menu.calib_open {
+        let ((sx, sy), (cx_, cy_)) = calib_chip_centers(cx, cy);
+        if (mx - sx).hypot(my - sy) <= ICON_RADIUS {
+            return RadialAction::SkipGazeCalib;
+        }
+        if (mx - cx_).hypot(my - cy_) <= ICON_RADIUS {
+            return RadialAction::CancelGazeCalib;
+        }
+        return RadialAction::None;
+    }
+    if menu.settings_open || menu.wizard_open {
         if let Some((_, sx, sy)) = centers.iter().find(|(id, _, _)| *id == IconId::Settings) {
             let (px, py, _, _) = panel_rect(*sx, *sy, screen_w, screen_h);
             let act = hit_panel_ex(mx, my, px, py, settings, people_n, enroll_active, wizard);
@@ -644,6 +680,9 @@ pub fn overlay_bounds(
     screen_w: f32,
     screen_h: f32,
 ) -> (f32, f32, f32, f32) {
+    if menu.calib_open {
+        return (0.0, 0.0, screen_w.max(1.0), screen_h.max(1.0));
+    }
     let mut x0 = cx - buddy_pad;
     let mut y0 = cy - buddy_pad;
     let mut x1 = cx + buddy_pad;
@@ -689,6 +728,12 @@ pub fn hit_rects(
     screen_h: f32,
 ) -> Vec<(i16, i16, u16, u16)> {
     let mut r = vec![circ_rect(cx, cy, buddy_pad)];
+    if menu.calib_open {
+        let ((sx, sy), (cx_, cy_)) = calib_chip_centers(cx, cy);
+        r.push(circ_rect(sx, sy, ICON_RADIUS + 2.0));
+        r.push(circ_rect(cx_, cy_, ICON_RADIUS + 2.0));
+        return r;
+    }
     if listening {
         for &(_, x, y) in &icon_centers(cx, cy, menu.layout_ms(now_ms), true) {
             r.push(circ_rect(x, y, ICON_RADIUS + 2.0));
@@ -1002,6 +1047,45 @@ mod tests {
         assert_eq!(
             hit_panel_ex(cx, cy, px, py, &s, 0, false, Some(hits)),
             RadialAction::WizardCancel
+        );
+    }
+
+    #[test]
+    fn calib_row_under_sliders_and_panel_open() {
+        let s = Settings::default();
+        let (px, py, _, _) = panel_rect(400.0, 400.0, 1920.0, 1200.0);
+        let c = calib_hit(px, py);
+        let stroke = slider_track(px, py, 2);
+        assert!(c.1 > stroke.1 + stroke.3);
+        assert_eq!(
+            hit_panel_ex(c.0 + 2.0, c.1 + 2.0, px, py, &s, 0, false, None),
+            RadialAction::StartGazeCalib
+        );
+        let mut menu = RadialMenu::new();
+        assert!(!menu.panel_open());
+        menu.calib_open = true;
+        assert!(menu.panel_open());
+        let bounds = overlay_bounds(200.0, 200.0, 100.0, true, &menu, 0, 800.0, 600.0);
+        assert!((bounds.2 - 800.0).abs() < 1.0 && (bounds.3 - 600.0).abs() < 1.0);
+        let hits = hit_rects(200.0, 200.0, 100.0, true, &menu, 0, 800.0, 600.0);
+        assert_eq!(hits.len(), 3);
+        let ((sx, sy), _) = calib_chip_centers(200.0, 200.0);
+        assert_eq!(
+            click_listening_ex(
+                &mut menu,
+                &mut Settings::default(),
+                sx,
+                sy,
+                200.0,
+                200.0,
+                0,
+                800.0,
+                600.0,
+                0,
+                false,
+                None
+            ),
+            RadialAction::SkipGazeCalib
         );
     }
 }

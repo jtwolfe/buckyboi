@@ -332,19 +332,6 @@ impl ProfileStore {
     pub fn next_default_name(&self) -> String {
         format!("P{}", self.file.people.len() + 1)
     }
-
-    /// Distinct `Embedding.kind` values currently stored as face vectors.
-    pub fn face_kinds(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for p in &self.file.people {
-            for e in &p.face {
-                if !out.contains(&e.kind) {
-                    out.push(e.kind.clone());
-                }
-            }
-        }
-        out
-    }
 }
 
 /// Identity knobs that live next to the overlay look sliders.

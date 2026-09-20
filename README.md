@@ -25,9 +25,10 @@ keep thin builds working without ONNX or a mic.
    Shape/XFixes), depth-sorted strokes, listening radial icons + settings,
    hide / wake, Esc quits.
 2. **Gaze** — webcam look-target; lazy avoid; dwell → listen. Not a
-   calibrated eye tracker. With `--features face` and `det_10g.onnx`,
-   the look-target comes from the SCRFD face box (largest / most
-   central if several people are in frame). Skin blob is the fallback.
+   research tracker (~3–6° / buddy-hit after 5-point calib, not
+   reading-gaze). With `--features face` and `face_landmarker.onnx`,
+   iris-in-eye (+ nose 2D) maps to the screen; Settings → UX → **CALIB**
+   writes `gaze_calib.json`. Missing mesh → SCRFD / skin face-box.
 3. **Multi-person identity** — enroll people under `~/.config/buckyboi/`.
    Cosine match, fail closed. No cloud.
 4. **Gating** — only enrolled people can start listen / sensitive
@@ -44,10 +45,10 @@ for the stack, [SPEC.md](SPEC.md) for icosahedron physics.
    (`BUCKYBOI_GAZE_LOCK_MS`) → **Listening** (cyan pulse), *if the gate allows*.
 3. **Click in place** still works as a fallback (press+release, move &lt; 6 px, &lt; 250 ms).
 4. In **Listening**, a ring of icons orbits the body. **Settings** has two
-   tabs: **UX** (camera / gate / listen / gaze / stroke) and **ID**
+   tabs: **UX** (camera / gate / listen / gaze / stroke / **CALIB**) and **ID**
    (people, enroll face / voice / gestures, delete).
 5. After a random **5–15 s** of Listening it **hides**. The timer pauses
-   while Settings or the first-run enroll wizard is open.
+   while Settings, gaze calib, or the first-run enroll wizard is open.
 6. While hidden, the first **mouse movement or key press** brings it back
    (X11). On Wayland / Hyprland: mouse via compositor IPC, or `SUPER+B`
    / `buckyboi --wake`.
@@ -56,6 +57,7 @@ An **auth chip** above the body shows the matched name or `UNKNOWN`.
 
 Esc quits. Settings persist in `~/.config/buckyboi/settings.ini`.
 People and embeddings persist in `~/.config/buckyboi/profiles.json`.
+5-point gaze calib (if you run it) is `~/.config/buckyboi/gaze_calib.json`.
 
 ## Feature flags
 
@@ -94,6 +96,7 @@ chmod +x scripts/download-models.sh
 | `det_10g.onnx` | `--features face` SCRFD (bbox + 5 landmarks) |
 | `w600k_mbf.onnx` | `--features face` ArcFace (default on empty / mbf galleries) |
 | `w600k_r50.onnx` | `--features face` ArcFace kept for existing `kind=arcface` galleries |
+| `face_landmarker.onnx` | `--features face` 478-pt iris mesh (optional; `BUCKYBOI_SKIP_GAZE_MESH=1`) |
 | `3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx` | `--features voice` sherpa (English default) |
 | `3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx` | EN fallback speaker net |
 | `palm_detection.onnx` / `hand_landmark.onnx` | `--features hands` MediaPipe ONNX |
@@ -292,14 +295,18 @@ wake on native Wayland — Omarchy uses Hyprland IPC + a hotkey (below).
 
 | Situation | What happens |
 | --- | --- |
-| `/dev/video0` readable (or `BUCKYBOI_CAMERA`) | Capture thread; SCRFD box (if `face` + `det_10g`) or skin/iris proxy → look-target; RGB stashed for identity. ONNX identity is throttled to ~12.5 Hz |
+| `/dev/video0` readable (or `BUCKYBOI_CAMERA`) | Capture thread; 478-pt iris mesh (if `face` + `face_landmarker.onnx`) or SCRFD/skin box → look-target; RGB stashed for identity. ONNX identity is throttled to ~12.5 Hz |
 | Device missing, busy, or `EACCES` | Log + mouse-avoid + click-to-listen. Overlay still runs |
 | `BUCKYBOI_NO_CAMERA=1` | Skip V4L |
 | No mic / no `voice` feature | Voice enroll waits for `BUCKYBOI_VOICE_SIM` or injected samples |
 | Cloud agent VM | Typically **no camera, no mic**. Unit tests cover identity; use `*_SIM` |
 
-**Honesty:** gaze is “where is the face in the frame?”, not research-grade
-tracking. Face / voice prints here are **prototypes**. They fail closed
+**Honesty:** calibrated webcam gaze is a **region / buddy-hit** look-target
+(~3–6° ≈ 80–180 px on 1920×1080 at ~50–70 cm, 640×480, head mostly
+still). It is **not** a Tobii / IR tracker and will not read text. Eyes
+moving with a still head should move the target after CALIB. Uncalibrated
+mesh is better than the face-box for eye-only motion but scale/offset
+are wrong. Face / voice prints here are **prototypes**. They fail closed
 and will false-reject in bad light or noise. Do not use this as a lock
 screen.
 

@@ -471,8 +471,19 @@ pub fn extract_parts(
     h: u32,
     want_embed: bool,
 ) -> (FaceQuality, Option<Embedding>) {
+    let (q, e, _) = extract_detected(rgb, w, h, want_embed);
+    (q, e)
+}
+
+/// Same as `extract_parts`, plus the primary `DetectedFace` for gaze ROI.
+pub fn extract_detected(
+    rgb: &[u8],
+    w: u32,
+    h: u32,
+    want_embed: bool,
+) -> (FaceQuality, Option<Embedding>, Option<DetectedFace>) {
     let (n, Some(face)) = detect_counted(rgb, w, h) else {
-        return (FaceQuality::reject(FaceReject::NoFace), None);
+        return (FaceQuality::reject(FaceReject::NoFace), None, None);
     };
     let (crop, aligned) = crop_for_quality(rgb, w, h, &face);
     let mut q = quality_from_crop(&crop, face.bbox, w, h, n);
@@ -486,24 +497,24 @@ pub fn extract_parts(
         faces: n,
     });
     if !q.ok {
-        return (q, None);
+        return (q, None, Some(face));
     }
     if !want_embed {
-        return (q, None);
+        return (q, None, Some(face));
     }
     let _ = aligned;
     #[cfg(feature = "face")]
     {
         if let Some(emb) = onnx_embed_aligned(&crop, aligned) {
-            return (q, Some(emb));
+            return (q, Some(emb), Some(face));
         }
     }
     if crate::identity::env_flag("BUCKYBOI_FACE_PROBE") {
-        return (q, Some(probe_embed(rgb, w, h, face.bbox)));
+        return (q, Some(probe_embed(rgb, w, h, face.bbox)), Some(face));
     }
     q.ok = false;
     q.reject = FaceReject::NoEmbed;
-    (q, None)
+    (q, None, Some(face))
 }
 
 #[cfg(feature = "face")]
@@ -609,12 +620,6 @@ pub fn loaded_rec_model_name() -> Option<String> {
 #[cfg(not(feature = "face"))]
 pub fn loaded_rec_model_name() -> Option<String> {
     None
-}
-
-/// Drop the ArcFace session so the next embed recommits.
-pub fn reload_rec() {
-    #[cfg(feature = "face")]
-    onnx::drop_rec();
 }
 
 #[cfg(test)]

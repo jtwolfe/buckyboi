@@ -16,7 +16,7 @@ toy and are not on the overlay / identity path.
 │   display/wake.rs      Hyprland IPC + UNIX sock + SIGUSR1   │
 │   sim.rs        icosahedron physics (SPEC.md)               │
 │   ux.rs         VisibleIdle / Listening / Hidden            │
-│   gaze.rs       look-target + dwell lock (pure)             │
+│   gaze.rs       look-target + dwell lock + uncalibrated 2D  │
 │   camera.rs     V4L2 → gaze + latest RGB frame              │
 │   radial.rs     icons + settings (UX / ID) + first-run wizard hits            │
 │   draw.rs       depth-sorted strokes + panel + auth chip    │
@@ -38,6 +38,9 @@ All matching is **local and fail-closed**. Nothing leaves the machine.
 | `align.rs` | InsightFace `arcface_dst` similarity + warpAffine | — |
 | `scrfd.rs` | letterbox / decode / NMS / largest-central pick | `face` → `ort` `det_10g.onnx` |
 | `face.rs` | quality + detect → align → embed | `face` → ArcFace ONNX |
+| `gaze_calib.rs` | 5-pt affine / 9-pt ridge + JSON | always (pure) |
+| `gaze_track.rs` | 478-pt ROI + iris-in-eye decode | `face` → `face_landmarker.onnx` |
+| `worker.rs` | vision thread; maps gaze → `GazeSnap` | `face` / `hands` / `voice` |
 | `voice.rs` | log-mel 80-d speaker print + VAD-ish energy | `voice` → `cpal` + sherpa-onnx |
 | `palm.rs` / `hands.rs` | 21-point rules + nearest-centroid | `hands` → palm + landmark ONNX |
 
@@ -67,8 +70,11 @@ or a microphone.
    - else `BUCKYBOI_FACE_PROBE=1` → 32-d crop histogram (`kind=face-probe`).
      Prototype only — opt-in and weak.
    - else **no embedding** (fail closed).
-5. Gaze look-target uses the SCRFD box when a detection is fresh;
-   otherwise the skin/iris proxy. Vision ONNX is throttled to ~12.5 Hz.
+5. Gaze: 478-pt landmarker iris-in-eye (+ nose 2D) when
+   `face_landmarker.onnx` is present; 5-point affine in
+   `gaze_calib.json`. Worker maps, present smooths. Face-box / skin
+   proxy is the fallback. Honest accuracy: **region / buddy-hit
+   (~3–6°)**, not a research tracker. Vision ONNX is throttled to ~12.5 Hz.
 
 Enrollment captures **8** accepted frames, then replaces that person’s face gallery.
 
@@ -123,6 +129,7 @@ Unknown never drives listen or sensitive gestures when a gate is on.
 ~/.config/buckyboi/
   settings.ini      look sliders + gate
   profiles.json     people, embeddings, gesture samples
+  gaze_calib.json   optional 5-point affine / 9-point ridge
   models/           optional ONNX (see scripts/download-models.sh)
 ```
 
