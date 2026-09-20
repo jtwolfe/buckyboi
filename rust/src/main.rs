@@ -8,8 +8,9 @@ use buckyboi::display::{
 use buckyboi::face_to_screen;
 use buckyboi::identity::{
     env_flag, env_flag_alias, env_or_alias, hands, latest_face, latest_hand, latest_look,
-    reload_rec, set_enrolling, set_gallery_kinds, set_screen, start_vision_worker, voice,
-    watch_vision_worker, FirstRunWizard, HandStatus, WizardEvent, LARGEST_FACE_CHIP,
+    latest_voice, reload_rec, set_enrolling, set_gallery_kinds, set_screen, start_mic,
+    start_vision_worker, voice, watch_vision_worker, wizard_auto_skip, FirstRunWizard, HandStatus,
+    WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
 };
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
@@ -198,27 +199,24 @@ fn identity_tick(
         }
     }
 
-    if enroll_capturing(enroll, EnrollKind::Voice) && now.saturating_sub(*last_voice_ms) >= 1_600 {
-        *last_voice_ms = now;
-        let samples = voice_samples();
-        if !samples.is_empty() {
-            let (q, emb) = voice::extract_embedding(&samples, voice::VOICE_SAMPLE_RATE);
-            let _ = enroll.push_voice(q, emb);
-        }
-    } else if matches!(enroll.phase, EnrollPhase::Idle)
-        && now.saturating_sub(*last_voice_ms) >= 2_400
-    {
-        if let Some(samples) = voice_samples_optional() {
-            *last_voice_ms = now;
-            let (q, emb) = voice::extract_embedding(&samples, voice::VOICE_SAMPLE_RATE);
-            if q.ok {
-                if let Some(emb) = emb {
+    if let Some(snap) = latest_voice() {
+        if now.saturating_sub(snap.t_ms) <= SNAP_FRESH_MS && snap.t_ms != *last_voice_ms {
+            *last_voice_ms = snap.t_ms;
+            if enroll_capturing(enroll, EnrollKind::Voice) {
+                let _ = enroll.push_voice(snap.quality, snap.embedding);
+            } else if snap.quality.ok {
+                if let Some(emb) = snap.embedding {
                     if let Some(hit) = profiles.match_voice(&emb) {
                         auth.note_voice(&hit.person_id, &hit.name, now, hit.score);
                     }
                 }
             }
         }
+    }
+
+    if enroll_capturing(enroll, EnrollKind::Voice) && enroll.timed_out(now, VOICE_ENROLL_TIMEOUT_MS)
+    {
+        enroll.fail_now("TIMEOUT");
     }
 
     if enroll_capturing(enroll, EnrollKind::Gesture) {
@@ -235,40 +233,13 @@ fn identity_tick(
     let _ = settings;
 }
 
-fn voice_tone() -> Vec<f32> {
-    let n = voice::VOICE_SAMPLE_RATE * 1600 / 1000;
-    (0..n)
-        .map(|i| {
-            0.22 * (2.0 * std::f32::consts::PI * 196.0 * i as f32 / voice::VOICE_SAMPLE_RATE as f32)
-                .sin()
-        })
-        .collect()
-}
-
-fn voice_samples() -> Vec<f32> {
-    if env_flag("BUCKYBOI_VOICE_SIM") {
-        return voice_tone();
-    }
-    #[cfg(feature = "voice")]
-    {
-        // Live mic is started lazily from main when voice enroll begins.
-    }
-    Vec::new()
-}
-
-fn voice_samples_optional() -> Option<Vec<f32>> {
-    if env_flag("BUCKYBOI_VOICE_SIM") {
-        return Some(voice_tone());
-    }
-    None
-}
-
 fn apply_identity_action(
     act: RadialAction,
     settings: &mut Settings,
     profiles: &mut ProfileStore,
     enroll: &mut EnrollSession,
     auth: &mut AuthSession,
+    now: u64,
 ) {
     match act {
         RadialAction::CycleGate
@@ -300,14 +271,19 @@ fn apply_identity_action(
         RadialAction::StartEnrollFace => {
             let (name, id) = person_target(profiles, settings);
             *enroll = EnrollSession::start_face(name, id);
-            enroll.begin_capture();
+            enroll.begin_capture_at(now);
             eprintln!("buckyboi: face enroll — look at the camera (or BUCKYBOI_FACE_SIM=1)");
         }
         RadialAction::StartEnrollVoice => {
             let (name, id) = person_target(profiles, settings);
             *enroll = EnrollSession::start_voice(name, id);
-            enroll.begin_capture();
-            eprintln!("buckyboi: voice enroll — speak for ~1.5s × 3 (or BUCKYBOI_VOICE_SIM=1)");
+            if !voice::input_available() {
+                enroll.fail_now("NO MIC");
+                eprintln!("buckyboi: voice enroll failed (NO MIC)");
+            } else {
+                enroll.begin_capture_at(now);
+                eprintln!("buckyboi: voice enroll — speak for ~1.5s × 3 (or BUCKYBOI_VOICE_SIM=1)");
+            }
         }
         RadialAction::StartEnrollHands => {
             let (name, id) = person_target(profiles, settings);
@@ -317,7 +293,7 @@ fn apply_identity_action(
                 GestureClass::Fist,
                 hands::GESTURE_ENROLL_NEED,
             );
-            enroll.begin_capture();
+            enroll.begin_capture_at(now);
             eprintln!("buckyboi: gesture calibrate — hold FIST (BUCKYBOI_HAND_SIM=fist …)");
         }
         RadialAction::CancelEnroll => {
@@ -412,6 +388,7 @@ fn apply_wizard_event(
     profiles: &mut ProfileStore,
     settings: &mut Settings,
     menu: &mut RadialMenu,
+    now: u64,
 ) {
     match ev {
         WizardEvent::None | WizardEvent::Opened => {}
@@ -419,15 +396,22 @@ fn apply_wizard_event(
             ensure_wizard_person(wizard, profiles, settings);
             *enroll =
                 EnrollSession::start_face(wizard.person_name.clone(), wizard.person_id.clone());
-            enroll.begin_capture();
+            enroll.begin_capture_at(now);
             eprintln!("buckyboi: wizard FACE — look at the camera (or BUCKYBOI_FACE_SIM=1)");
         }
         WizardEvent::BeginVoice => {
             ensure_wizard_person(wizard, profiles, settings);
             *enroll =
                 EnrollSession::start_voice(wizard.person_name.clone(), wizard.person_id.clone());
-            enroll.begin_capture();
-            eprintln!("buckyboi: wizard VOICE — speak ~1.5s × 3 or SKIP (BUCKYBOI_VOICE_SIM=1)");
+            if !voice::input_available() {
+                enroll.fail_now("NO MIC");
+                eprintln!("buckyboi: wizard VOICE failed (NO MIC)");
+            } else {
+                enroll.begin_capture_at(now);
+                eprintln!(
+                    "buckyboi: wizard VOICE — speak ~1.5s × 3 or SKIP (BUCKYBOI_VOICE_SIM=1)"
+                );
+            }
         }
         WizardEvent::BeginHands(class) => {
             ensure_wizard_person(wizard, profiles, settings);
@@ -437,7 +421,7 @@ fn apply_wizard_event(
                 class,
                 hands::GESTURE_ENROLL_NEED,
             );
-            enroll.begin_capture();
+            enroll.begin_capture_at(now);
             eprintln!(
                 "buckyboi: wizard HAND {} — hold or SKIP (BUCKYBOI_HAND_SIM)",
                 class.label()
@@ -463,6 +447,45 @@ fn apply_wizard_event(
             close_wizard_chrome(menu);
             eprintln!("buckyboi: wizard cancelled");
         }
+    }
+}
+
+fn settle_enroll(
+    now: u64,
+    enroll: &mut EnrollSession,
+    wizard: &mut FirstRunWizard,
+    profiles: &mut ProfileStore,
+    settings: &mut Settings,
+    menu: &mut RadialMenu,
+) {
+    for _ in 0..8 {
+        if matches!(enroll.phase, EnrollPhase::Done { .. }) {
+            let kind = enroll.kind;
+            finish_enroll(enroll, profiles, settings);
+            if wizard.is_open() {
+                apply_wizard_event(
+                    wizard.on_enroll_finished(kind),
+                    wizard,
+                    enroll,
+                    profiles,
+                    settings,
+                    menu,
+                    now,
+                );
+            }
+            continue;
+        }
+        if let EnrollPhase::Failed { reason } = &enroll.phase {
+            let reason = reason.clone();
+            let kind = enroll.kind;
+            if wizard.is_open() && wizard_auto_skip(kind, &reason) {
+                *enroll = EnrollSession::idle();
+                apply_wizard_event(wizard.skip(), wizard, enroll, profiles, settings, menu, now);
+                continue;
+            }
+            // Leave Failed so the HUD can show NO MIC / TIMEOUT / NO FACE.
+        }
+        break;
     }
 }
 
@@ -588,6 +611,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut backend = open_backend()?;
+    start_mic();
     let mut wake = WakeBus::bind();
     let (mut sw, mut sh) = backend.size();
 
@@ -736,6 +760,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ev_press = input.ev_press;
         let ev_release = input.ev_release;
 
+        let now = now_ms();
         if input.escape && !prev_escape {
             if wizard.is_open() {
                 wizard_declined = true;
@@ -747,6 +772,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut profiles,
                     &mut settings,
                     &mut menu,
+                    now,
                 );
             } else {
                 break;
@@ -754,7 +780,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         prev_escape = input.escape;
 
-        let now = now_ms();
         watch_vision_worker(now);
         identity_tick(
             now,
@@ -767,21 +792,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut last_voice_ms,
             &mut last_hand_ms,
         );
-        if matches!(enroll.phase, EnrollPhase::Done { .. }) {
-            let kind = enroll.kind;
-            finish_enroll(&mut enroll, &mut profiles, &mut settings);
-            if wizard.is_open() {
-                let ev = wizard.on_enroll_finished(kind);
-                apply_wizard_event(
-                    ev,
-                    &mut wizard,
-                    &mut enroll,
-                    &mut profiles,
-                    &mut settings,
-                    &mut menu,
-                );
-            }
-        }
+        settle_enroll(
+            now,
+            &mut enroll,
+            &mut wizard,
+            &mut profiles,
+            &mut settings,
+            &mut menu,
+        );
         if matches!(enroll.phase, EnrollPhase::Idle) && !wizard.is_open() {
             if let Some(gact) = maybe_gesture_action(
                 now,
@@ -992,6 +1010,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut profiles,
                         &mut enroll,
                         &mut auth,
+                        now,
                     );
                     match act {
                         RadialAction::Dismiss => {
@@ -1091,6 +1110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &mut profiles,
                                 &mut settings,
                                 &mut menu,
+                                now,
                             );
                         }
                         RadialAction::WizardSkip => {
@@ -1103,6 +1123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &mut profiles,
                                 &mut settings,
                                 &mut menu,
+                                now,
                             );
                         }
                         RadialAction::WizardCancel => {
@@ -1115,6 +1136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &mut profiles,
                                 &mut settings,
                                 &mut menu,
+                                now,
                             );
                         }
                         RadialAction::WizardAddAnother => {
@@ -1128,6 +1150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &mut profiles,
                                 &mut settings,
                                 &mut menu,
+                                now,
                             );
                         }
                         RadialAction::None
@@ -1156,6 +1179,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+
+        settle_enroll(
+            now,
+            &mut enroll,
+            &mut wizard,
+            &mut profiles,
+            &mut settings,
+            &mut menu,
+        );
 
         if mapped && ux.phase != Phase::Hidden {
             let listening = ux.phase == Phase::Listening;

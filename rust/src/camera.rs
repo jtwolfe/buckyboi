@@ -293,9 +293,13 @@ fn decode_mjpeg(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static SLOT_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn camframe_arc_clone_shares_buffer() {
+        let _g = SLOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let rgb: Arc<[u8]> = Arc::from(vec![9u8; 12]);
         let a = CamFrame {
             rgb: Arc::clone(&rgb),
@@ -314,6 +318,7 @@ mod tests {
 
     #[test]
     fn request_stop_bumps_epoch_and_clears_slot() {
+        let _g = SLOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let rgb: Arc<[u8]> = Arc::from(vec![1u8; 12]);
         store_frame(CamFrame {
             rgb,

@@ -3,7 +3,9 @@
 use crate::identity::embed::Embedding;
 use crate::identity::face::{FaceQuality, FACE_ENROLL_NEED};
 use crate::identity::hands::GestureClass;
-use crate::identity::voice::{VoiceQuality, VOICE_ENROLL_NEED};
+use crate::identity::voice::{
+    VoiceQuality, VoiceReject, VOICE_ENROLL_NEED, VOICE_ENROLL_REJECT_CAP,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnrollKind {
@@ -58,6 +60,8 @@ pub struct EnrollSession {
     pub rejects: u32,
     pub need: usize,
     pub last_reject: Option<String>,
+    /// Wall clock origin for voice timeout. Stamped once by `begin_capture_at`.
+    pub started_ms: u64,
 }
 
 impl EnrollSession {
@@ -73,6 +77,7 @@ impl EnrollSession {
             rejects: 0,
             need: FACE_ENROLL_NEED,
             last_reject: None,
+            started_ms: 0,
         }
     }
 
@@ -93,6 +98,7 @@ impl EnrollSession {
             rejects: 0,
             need: FACE_ENROLL_NEED,
             last_reject: None,
+            started_ms: 0,
         }
     }
 
@@ -113,6 +119,7 @@ impl EnrollSession {
             rejects: 0,
             need: VOICE_ENROLL_NEED,
             last_reject: None,
+            started_ms: 0,
         }
     }
 
@@ -138,9 +145,11 @@ impl EnrollSession {
             rejects: 0,
             need: need.max(3),
             last_reject: None,
+            started_ms: 0,
         }
     }
 
+    /// Phase → Capturing only. Does not move `started_ms` (timeout origin).
     pub fn begin_capture(&mut self) {
         if matches!(
             self.phase,
@@ -157,6 +166,31 @@ impl EnrollSession {
         };
     }
 
+    /// Call once from StartEnroll / wizard Begin. Idempotent: stamps only if 0.
+    pub fn begin_capture_at(&mut self, now_ms: u64) {
+        self.begin_capture();
+        if self.started_ms == 0 {
+            self.started_ms = now_ms;
+        }
+    }
+
+    pub fn timed_out(&self, now: u64, limit: u64) -> bool {
+        self.started_ms > 0 && now.saturating_sub(self.started_ms) >= limit
+    }
+
+    pub fn fail_now(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        if !matches!(&self.phase, EnrollPhase::Failed { reason: r } if r == &reason) {
+            eprintln!("buckyboi: enroll failed ({reason})");
+        }
+        self.phase = EnrollPhase::Failed { reason };
+    }
+
+    pub fn note_reject(&mut self, hint: impl Into<String>) {
+        self.rejects = self.rejects.saturating_add(1);
+        self.last_reject = Some(hint.into());
+    }
+
     pub fn cancel(&mut self) {
         *self = Self::idle();
     }
@@ -166,21 +200,21 @@ impl EnrollSession {
             return EnrollEvent::None;
         }
         self.begin_capture();
+        if quality.reject == crate::identity::face::FaceReject::NoEmbed {
+            self.fail_now(quality.reject.hint());
+            return EnrollEvent::Failed;
+        }
         if !quality.ok {
-            self.rejects = self.rejects.saturating_add(1);
-            self.last_reject = Some(quality.reject.hint().into());
+            self.note_reject(quality.reject.hint());
             if self.rejects > 40 {
-                self.phase = EnrollPhase::Failed {
-                    reason: self.last_reject.clone().unwrap_or_else(|| "NO FACE".into()),
-                };
+                self.fail_now(self.last_reject.clone().unwrap_or_else(|| "NO FACE".into()));
                 return EnrollEvent::Failed;
             }
             return EnrollEvent::Rejected;
         }
         let Some(emb) = emb else {
-            self.rejects = self.rejects.saturating_add(1);
-            self.last_reject = Some(crate::identity::face::FaceReject::NoEmbed.hint().into());
-            return EnrollEvent::Rejected;
+            // Live rec-skip leftover (ok quality, no vector) — do not burn the cap.
+            return EnrollEvent::None;
         };
         self.last_reject = None;
         self.accepted.push(emb);
@@ -201,16 +235,18 @@ impl EnrollSession {
             return EnrollEvent::None;
         }
         self.begin_capture();
+        if quality.reject == VoiceReject::NoMic {
+            self.fail_now(quality.reject.hint());
+            return EnrollEvent::Failed;
+        }
         if !quality.ok {
-            self.rejects = self.rejects.saturating_add(1);
-            self.last_reject = Some(quality.reject.hint().into());
-            if self.rejects > 20 {
-                self.phase = EnrollPhase::Failed {
-                    reason: self
-                        .last_reject
+            self.note_reject(quality.reject.hint());
+            if self.rejects >= VOICE_ENROLL_REJECT_CAP {
+                self.fail_now(
+                    self.last_reject
                         .clone()
-                        .unwrap_or_else(|| "TOO SHORT".into()),
-                };
+                        .unwrap_or_else(|| "TOO QUIET".into()),
+                );
                 return EnrollEvent::Failed;
             }
             return EnrollEvent::Rejected;
@@ -317,12 +353,25 @@ impl EnrollSession {
     }
 }
 
+/// Wizard skip-on-fail. Voice device/timeout/quiet cap and face NO MODEL only.
+/// Face `NO FACE` / lighting stays on the 40-reject cap so the user can fix it.
+pub fn wizard_auto_skip(kind: EnrollKind, reason: &str) -> bool {
+    let r = reason.trim().to_ascii_uppercase();
+    match kind {
+        EnrollKind::Voice => {
+            matches!(r.as_str(), "NO MIC" | "TIMEOUT" | "TOO QUIET" | "TOO SHORT")
+        }
+        EnrollKind::Face => r == "NO MODEL",
+        EnrollKind::Gesture => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::embed::Embedding;
     use crate::identity::face::FaceQuality;
-    use crate::identity::voice::VoiceQuality;
+    use crate::identity::voice::{VoiceQuality, VOICE_ENROLL_TIMEOUT_MS};
 
     fn ok_face() -> FaceQuality {
         FaceQuality {
@@ -405,5 +454,89 @@ mod tests {
         };
         assert_eq!(s.push_face(dark, None), EnrollEvent::Rejected);
         assert_eq!(s.hint(), "TOO DARK");
+    }
+
+    fn quiet_q() -> VoiceQuality {
+        VoiceQuality {
+            duration_ms: 0,
+            energy: 0.0,
+            ok: false,
+            reject: crate::identity::voice::VoiceReject::TooShort,
+        }
+    }
+
+    #[test]
+    fn no_mic_fails_immediately() {
+        let mut s = EnrollSession::start_voice("Ada", None);
+        let q = VoiceQuality {
+            duration_ms: 0,
+            energy: 0.0,
+            ok: false,
+            reject: crate::identity::voice::VoiceReject::NoMic,
+        };
+        assert_eq!(s.push_voice(q, None), EnrollEvent::Failed);
+        assert!(matches!(s.phase, EnrollPhase::Failed { ref reason } if reason == "NO MIC"));
+        assert_eq!(s.hint(), "NO MIC");
+        s.fail_now("NO MIC");
+        assert!(!wizard_auto_skip(EnrollKind::Face, "NO FACE"));
+        assert!(wizard_auto_skip(EnrollKind::Voice, "NO MIC"));
+    }
+
+    #[test]
+    fn push_voice_rejects_do_not_extend_deadline() {
+        let mut s = EnrollSession::start_voice("Ada", None);
+        s.begin_capture_at(1_000);
+        assert_eq!(s.push_voice(quiet_q(), None), EnrollEvent::Rejected);
+        s.begin_capture_at(3_000);
+        assert_eq!(s.started_ms, 1_000);
+        assert_eq!(s.push_voice(quiet_q(), None), EnrollEvent::Rejected);
+        assert_eq!(s.started_ms, 1_000);
+        assert!(!s.timed_out(1_000 + VOICE_ENROLL_TIMEOUT_MS - 1, VOICE_ENROLL_TIMEOUT_MS));
+        assert!(s.timed_out(1_000 + VOICE_ENROLL_TIMEOUT_MS, VOICE_ENROLL_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn empty_voice_ticks_increment_rejects() {
+        let mut s = EnrollSession::start_voice("Ada", None);
+        s.begin_capture_at(0);
+        let empty = VoiceQuality::assess(&[], crate::identity::voice::VOICE_SAMPLE_RATE);
+        assert!(!empty.ok);
+        for i in 0..VOICE_ENROLL_REJECT_CAP - 1 {
+            assert_eq!(s.push_voice(empty, None), EnrollEvent::Rejected);
+            assert_eq!(s.rejects, i + 1);
+        }
+        assert_eq!(s.push_voice(empty, None), EnrollEvent::Failed);
+        assert!(matches!(s.phase, EnrollPhase::Failed { .. }));
+        assert!(wizard_auto_skip(EnrollKind::Voice, &s.hint()));
+    }
+
+    #[test]
+    fn no_embed_fails_immediately_no_face_does_not_auto_skip() {
+        let mut s = EnrollSession::start_face("Ada", None);
+        let no_model = FaceQuality {
+            ok: false,
+            reject: crate::identity::face::FaceReject::NoEmbed,
+            ..ok_face()
+        };
+        assert_eq!(s.push_face(no_model, None), EnrollEvent::Failed);
+        assert!(wizard_auto_skip(EnrollKind::Face, "NO MODEL"));
+        assert!(!wizard_auto_skip(EnrollKind::Face, "NO FACE"));
+        assert!(!wizard_auto_skip(EnrollKind::Face, "TOO DARK"));
+        let mut face = EnrollSession::start_face("Ada", None);
+        let none = FaceQuality {
+            ok: false,
+            reject: crate::identity::face::FaceReject::NoFace,
+            ..ok_face()
+        };
+        assert_eq!(face.push_face(none, None), EnrollEvent::Rejected);
+        assert!(!matches!(face.phase, EnrollPhase::Failed { .. }));
+    }
+
+    #[test]
+    fn begin_capture_does_not_move_started_ms() {
+        let mut s = EnrollSession::start_voice("Ada", None);
+        s.begin_capture_at(50);
+        s.begin_capture();
+        assert_eq!(s.started_ms, 50);
     }
 }
