@@ -19,7 +19,7 @@ use smithay_client_toolkit::shell::wlr_layer::{
     LayerSurfaceConfigure,
 };
 use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shm::slot::SlotPool;
+use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
@@ -52,6 +52,12 @@ struct WaylandApp {
     shm: Shm,
     layer: LayerSurface,
     pool: SlotPool,
+    /// Two shm slots; draw only after `wl_buffer.release`.
+    buffers: [Option<Buffer>; 2],
+    /// Last origin blit into each slot (`None` = uninitialized, full fill).
+    buf_rect: [Option<(i16, i16, u16, u16)>; 2],
+    /// Last origin committed to the compositor.
+    prev_rect: Option<(i16, i16, u16, u16)>,
     width: u32,
     height: u32,
     configured: bool,
@@ -92,7 +98,8 @@ impl WaylandDisplay {
         layer.set_size(0, 0);
         layer.commit();
 
-        let pool = SlotPool::new(1920 * 1080 * 4, &shm).map_err(|e| format!("wl_shm pool: {e}"))?;
+        let pool =
+            SlotPool::new(1920 * 1080 * 4 * 2, &shm).map_err(|e| format!("wl_shm pool: {e}"))?;
 
         let mut app = WaylandApp {
             registry_state: RegistryState::new(&globals),
@@ -102,6 +109,9 @@ impl WaylandDisplay {
             shm,
             layer,
             pool,
+            buffers: [None, None],
+            buf_rect: [None, None],
+            prev_rect: None,
             width: 0,
             height: 0,
             configured: false,
@@ -201,6 +211,7 @@ impl WaylandDisplay {
     }
 
     pub fn hide(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        pump(&self.conn, &mut self.event_queue, &mut self.app, 0)?;
         self.app.hidden = true;
         let qh = self.event_queue.handle();
         apply_hits(&self.app, &qh, &[]);
@@ -277,43 +288,138 @@ fn apply_hits(app: &WaylandApp, qh: &QueueHandle<WaylandApp>, hits: &[(i16, i16,
     region.destroy();
 }
 
-fn ensure_buffer<'a>(
-    app: &'a mut WaylandApp,
-    qh: &QueueHandle<WaylandApp>,
-) -> Result<(smithay_client_toolkit::shm::slot::Buffer, &'a mut [u8]), Box<dyn std::error::Error>> {
-    let _ = qh;
-    let w = app.width.max(1) as i32;
-    let h = app.height.max(1) as i32;
-    let stride = w * 4;
-    let need = (w as usize) * (h as usize) * 4;
-    let resize = app
-        .pool
-        .create_buffer(w, h, stride, wl_shm::Format::Argb8888)
-        .is_err();
-    if resize {
-        app.pool = SlotPool::new((need * 2).max(4096), &app.shm)
-            .map_err(|e| format!("wl_shm resize: {e}"))?;
+const DAMAGE_PAD: i32 = 2;
+
+fn drop_slots(app: &mut WaylandApp) {
+    app.buffers = [None, None];
+    app.buf_rect = [None, None];
+    app.prev_rect = None;
+}
+
+/// Released slot, or an empty slot to create. `None` if both are outstanding.
+fn pick_released(app: &mut WaylandApp) -> Result<Option<usize>, Box<dyn std::error::Error>> {
+    let w = app.width.max(1);
+    let h = app.height.max(1);
+    let stride = (w as i32) * 4;
+    let height = h as i32;
+
+    let stale = app.buffers.iter().any(|slot| {
+        slot.as_ref()
+            .is_some_and(|b| b.height() != height || b.stride() != stride)
+    });
+    if stale {
+        drop_slots(app);
     }
-    app.pool
-        .create_buffer(w, h, stride, wl_shm::Format::Argb8888)
-        .map_err(|e| format!("wl_shm buffer: {e}").into())
+
+    let mut idx = None;
+    {
+        let pool = &mut app.pool;
+        for (i, slot) in app.buffers.iter().enumerate() {
+            if let Some(buf) = slot {
+                if buf.canvas(pool).is_some() {
+                    idx = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+    if idx.is_none() {
+        idx = app.buffers.iter().position(Option::is_none);
+    }
+    let Some(i) = idx else {
+        return Ok(None);
+    };
+    if app.buffers[i].is_some() {
+        return Ok(Some(i));
+    }
+
+    match app
+        .pool
+        .create_buffer(w as i32, height, stride, wl_shm::Format::Argb8888)
+    {
+        Ok((buffer, _)) => {
+            app.buffers[i] = Some(buffer);
+            app.buf_rect[i] = None;
+            Ok(Some(i))
+        }
+        Err(_) => {
+            drop_slots(app);
+            let need = (w as usize) * (h as usize) * 4;
+            app.pool = SlotPool::new((need * 2).max(4096), &app.shm)
+                .map_err(|e| format!("wl_shm resize: {e}"))?;
+            let (buffer, _) = app
+                .pool
+                .create_buffer(w as i32, height, stride, wl_shm::Format::Argb8888)
+                .map_err(|e| format!("wl_shm buffer: {e}"))?;
+            app.buffers[i] = Some(buffer);
+            app.buf_rect[i] = None;
+            Ok(Some(i))
+        }
+    }
+}
+
+fn paint_slot(
+    app: &mut WaylandApp,
+    i: usize,
+    full: bool,
+    leftover: Option<(i16, i16, u16, u16)>,
+    origin: (i16, i16, u16, u16),
+    pixels: Option<&[u8]>,
+) -> bool {
+    let w = app.width.max(1);
+    let h = app.height.max(1);
+    let canvas = match app.buffers[i].as_ref() {
+        Some(buf) => buf.canvas(&mut app.pool),
+        None => None,
+    };
+    let Some(canvas) = canvas else {
+        return false;
+    };
+    if full {
+        canvas.fill(0);
+    } else if let Some(old) = leftover {
+        zero_rect(canvas, w, h, old);
+    }
+    if let Some(px) = pixels {
+        blit_argb(canvas, w, h, origin, px);
+    }
+    true
+}
+
+fn attach_commit(app: &mut WaylandApp, i: usize) -> bool {
+    {
+        let surface = app.layer.wl_surface();
+        let Some(buf) = app.buffers[i].as_ref() else {
+            return false;
+        };
+        if buf.attach_to(surface).is_err() {
+            return false;
+        }
+    }
+    app.layer.commit();
+    true
 }
 
 fn commit_clear(
     app: &mut WaylandApp,
     qh: &QueueHandle<WaylandApp>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = qh;
     let w = app.width.max(1);
     let h = app.height.max(1);
-    let (buffer, canvas) = ensure_buffer(app, qh)?;
-    canvas.fill(0);
+    let Some(i) = pick_released(app)? else {
+        return Ok(());
+    };
+    if !paint_slot(app, i, true, None, (0, 0, 0, 0), None) {
+        return Ok(());
+    }
     app.layer
         .wl_surface()
         .damage_buffer(0, 0, w as i32, h as i32);
-    buffer
-        .attach_to(app.layer.wl_surface())
-        .map_err(|e| format!("attach: {e:?}"))?;
-    app.layer.commit();
+    if attach_commit(app, i) {
+        app.buf_rect[i] = Some((0, 0, 0, 0));
+        app.prev_rect = None;
+    }
     Ok(())
 }
 
@@ -323,19 +429,100 @@ fn commit_pixels(
     pixels: &[u8],
     origin: (i16, i16, u16, u16),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = qh;
     let w = app.width.max(1);
     let h = app.height.max(1);
-    let (buffer, canvas) = ensure_buffer(app, qh)?;
-    canvas.fill(0);
-    blit_argb(canvas, w, h, origin, pixels);
-    app.layer
-        .wl_surface()
-        .damage_buffer(0, 0, w as i32, h as i32);
-    buffer
-        .attach_to(app.layer.wl_surface())
-        .map_err(|e| format!("attach: {e:?}"))?;
-    app.layer.commit();
+    let Some(i) = pick_released(app)? else {
+        // Never block present on wl_buffer.release.
+        return Ok(());
+    };
+    let leftover = app.buf_rect[i];
+    let full = leftover.is_none();
+    let prev = app.prev_rect;
+    if !paint_slot(app, i, full, leftover, origin, Some(pixels)) {
+        return Ok(());
+    }
+    if full {
+        app.layer
+            .wl_surface()
+            .damage_buffer(0, 0, w as i32, h as i32);
+    } else {
+        let (dx, dy, dw, dh) = pad_rect(union_opt(prev, origin), w, h);
+        if dw > 0 && dh > 0 {
+            app.layer.wl_surface().damage_buffer(dx, dy, dw, dh);
+        }
+    }
+    if attach_commit(app, i) {
+        app.buf_rect[i] = Some(origin);
+        app.prev_rect = Some(origin);
+    }
     Ok(())
+}
+
+fn zero_rect(dst: &mut [u8], dw: u32, dh: u32, rect: (i16, i16, u16, u16)) {
+    let (ox, oy, rw, rh) = rect;
+    if rw == 0 || rh == 0 {
+        return;
+    }
+    let dw_i = dw as i32;
+    let dh_i = dh as i32;
+    for row in 0..rh as i32 {
+        let dy = oy as i32 + row;
+        if dy < 0 || dy >= dh_i {
+            continue;
+        }
+        let mut dx = ox as i32;
+        let mut copy_w = rw as i32;
+        if dx < 0 {
+            copy_w += dx;
+            dx = 0;
+        }
+        if dx + copy_w > dw_i {
+            copy_w = dw_i - dx;
+        }
+        if copy_w <= 0 {
+            continue;
+        }
+        let d = (dy as usize * dw as usize + dx as usize) * 4;
+        let n = copy_w as usize * 4;
+        if d + n <= dst.len() {
+            dst[d..d + n].fill(0);
+        }
+    }
+}
+
+fn union_rect(a: (i16, i16, u16, u16), b: (i16, i16, u16, u16)) -> (i16, i16, u16, u16) {
+    if a.2 == 0 || a.3 == 0 {
+        return b;
+    }
+    if b.2 == 0 || b.3 == 0 {
+        return a;
+    }
+    let x0 = a.0.min(b.0);
+    let y0 = a.1.min(b.1);
+    let x1 = (i32::from(a.0) + i32::from(a.2)).max(i32::from(b.0) + i32::from(b.2));
+    let y1 = (i32::from(a.1) + i32::from(a.3)).max(i32::from(b.1) + i32::from(b.3));
+    let w = (x1 - i32::from(x0)).clamp(0, i32::from(u16::MAX)) as u16;
+    let h = (y1 - i32::from(y0)).clamp(0, i32::from(u16::MAX)) as u16;
+    (x0, y0, w, h)
+}
+
+fn union_opt(a: Option<(i16, i16, u16, u16)>, b: (i16, i16, u16, u16)) -> (i16, i16, u16, u16) {
+    match a {
+        Some(a) => union_rect(a, b),
+        None => b,
+    }
+}
+
+fn pad_rect(r: (i16, i16, u16, u16), dw: u32, dh: u32) -> (i32, i32, i32, i32) {
+    if r.2 == 0 || r.3 == 0 {
+        return (0, 0, 0, 0);
+    }
+    let x0 = (i32::from(r.0) - DAMAGE_PAD).max(0);
+    let y0 = (i32::from(r.1) - DAMAGE_PAD).max(0);
+    let x1 = (i32::from(r.0) + i32::from(r.2) + DAMAGE_PAD).min(dw as i32);
+    let y1 = (i32::from(r.1) + i32::from(r.3) + DAMAGE_PAD).min(dh as i32);
+    (x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
 fn blit_argb(dst: &mut [u8], dw: u32, dh: u32, origin: (i16, i16, u16, u16), src: &[u8]) {
@@ -465,13 +652,21 @@ impl LayerShellHandler for WaylandApp {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        let mut resized = false;
         if configure.new_size.0 > 0 {
+            resized |= self.width != configure.new_size.0;
             self.width = configure.new_size.0;
         }
         if configure.new_size.1 > 0 {
+            resized |= self.height != configure.new_size.1;
             self.height = configure.new_size.1;
         }
         self.configured = true;
+        self.buf_rect = [None, None];
+        self.prev_rect = None;
+        if resized {
+            self.buffers = [None, None];
+        }
     }
 }
 
@@ -657,6 +852,43 @@ mod tests {
         let i = (1 * 8 + 1) * 4;
         assert_eq!(dst[i], 9);
         assert_eq!(dst[0], 0);
+    }
+
+    #[test]
+    fn zero_rect_clears_only_target() {
+        let mut dst = vec![7u8; 8 * 4 * 4];
+        zero_rect(&mut dst, 8, 4, (1, 1, 2, 2));
+        assert_eq!(dst[0], 7);
+        let i = (1 * 8 + 1) * 4;
+        assert_eq!(&dst[i..i + 8], &[0u8; 8]);
+        let j = (2 * 8 + 1) * 4;
+        assert_eq!(&dst[j..j + 8], &[0u8; 8]);
+        assert_eq!(dst[(1 * 8 + 3) * 4], 7);
+    }
+
+    #[test]
+    fn zero_rect_empty_is_noop() {
+        let mut dst = vec![3u8; 16];
+        zero_rect(&mut dst, 2, 2, (0, 0, 0, 1));
+        assert_eq!(dst, vec![3u8; 16]);
+    }
+
+    #[test]
+    fn union_rect_covers_prev_and_new() {
+        assert_eq!(
+            union_rect((10, 10, 20, 20), (20, 15, 20, 20)),
+            (10, 10, 30, 25)
+        );
+        assert_eq!(union_opt(Some((4, 8, 2, 2)), (10, 8, 2, 2)), (4, 8, 8, 2));
+        assert_eq!(union_opt(None, (5, 6, 7, 8)), (5, 6, 7, 8));
+        assert_eq!(union_rect((0, 0, 0, 0), (5, 6, 7, 8)), (5, 6, 7, 8));
+    }
+
+    #[test]
+    fn pad_rect_clamps_to_surface() {
+        assert_eq!(pad_rect((0, 0, 4, 4), 10, 10), (0, 0, 6, 6));
+        assert_eq!(pad_rect((8, 8, 2, 2), 10, 10), (6, 6, 4, 4));
+        assert_eq!(pad_rect((0, 0, 0, 0), 10, 10), (0, 0, 0, 0));
     }
 
     #[test]
