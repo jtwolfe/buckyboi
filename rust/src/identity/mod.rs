@@ -37,7 +37,7 @@ pub use voice::{
     voice_cosine_threshold, VoiceQuality, VoiceReject, VOICE_ENROLL_NEED, VOICE_ENROLL_REJECT_CAP,
     VOICE_ENROLL_TIMEOUT_MS, VOICE_MIN_MS, VOICE_THRESHOLD_SHERPA,
 };
-pub use wizard::{FirstRunWizard, WizardEvent, WizardStep, LARGEST_FACE_CHIP};
+pub use wizard::{skip_on_enroll_fail, FirstRunWizard, WizardEvent, WizardStep, LARGEST_FACE_CHIP};
 pub use worker::{
     latest_face, latest_hand, latest_voice, publishing_gaze, reload_rec, set_enrolling,
     set_gallery_kinds, set_screen, start_vision_worker, watch_vision_worker, FaceSnap, HandSnap,
