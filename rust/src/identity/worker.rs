@@ -1,8 +1,11 @@
-//! Vision worker: ONNX / sherpa off the present thread. FaceSnap + HandSnap + VoiceSnap.
+//! Vision worker: ONNX / sherpa off the present thread. Face / hand / gaze / voice snaps.
 
+#[cfg(feature = "face")]
+use crate::gaze::face_to_screen;
 use crate::identity::embed::Embedding;
 use crate::identity::enroll::EnrollKind;
 use crate::identity::face::FaceQuality;
+use crate::identity::gaze_calib::GazeCalib;
 use crate::identity::hands::HandStatus;
 use crate::identity::voice::VoiceQuality;
 use crate::identity::VISION_INFER_MS;
@@ -38,11 +41,39 @@ pub struct VoiceSnap {
     pub embedding: Option<Embedding>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GazeKind {
+    MeshCalibrated,
+    MeshUncalibrated,
+    FaceBox,
+}
+
+#[derive(Clone, Debug)]
+pub struct GazeSnap {
+    pub t_ms: u64,
+    pub sx: f32,
+    pub sy: f32,
+    pub kind: GazeKind,
+    pub iris_nx: f32,
+    pub iris_ny: f32,
+    pub nose_nx: f32,
+    pub nose_ny: f32,
+    pub iris_l: bool,
+    pub iris_r: bool,
+    pub ok: bool,
+}
+
 static FACE_SLOT: OnceLock<Mutex<Option<FaceSnap>>> = OnceLock::new();
 static HAND_SLOT: OnceLock<Mutex<Option<HandSnap>>> = OnceLock::new();
 static VOICE_SLOT: OnceLock<Mutex<Option<VoiceSnap>>> = OnceLock::new();
+static GAZE_SLOT: OnceLock<Mutex<Option<GazeSnap>>> = OnceLock::new();
+static CALIB_SLOT: OnceLock<Mutex<Option<GazeCalib>>> = OnceLock::new();
 static GALLERY_KINDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static HANDLE: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
+#[cfg_attr(not(feature = "face"), allow(dead_code))]
+static GAZE_LOGGED: Mutex<u8> = Mutex::new(0);
+#[cfg_attr(not(feature = "face"), allow(dead_code))]
+static CAM_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(
     not(any(feature = "face", feature = "hands", feature = "voice")),
@@ -78,6 +109,14 @@ fn voice_slot() -> &'static Mutex<Option<VoiceSnap>> {
     VOICE_SLOT.get_or_init(|| Mutex::new(None))
 }
 
+fn gaze_slot() -> &'static Mutex<Option<GazeSnap>> {
+    GAZE_SLOT.get_or_init(|| Mutex::new(None))
+}
+
+fn calib_slot() -> &'static Mutex<Option<GazeCalib>> {
+    CALIB_SLOT.get_or_init(|| Mutex::new(GazeCalib::load()))
+}
+
 fn kinds_slot() -> &'static Mutex<Vec<String>> {
     GALLERY_KINDS.get_or_init(|| Mutex::new(Vec::new()))
 }
@@ -103,6 +142,13 @@ fn publish_hand(snap: HandSnap) {
 #[cfg_attr(not(feature = "voice"), allow(dead_code))]
 fn publish_voice(snap: VoiceSnap) {
     if let Ok(mut g) = voice_slot().lock() {
+        *g = Some(snap);
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "face")), allow(dead_code))]
+fn publish_gaze(snap: GazeSnap) {
+    if let Ok(mut g) = gaze_slot().lock() {
         *g = Some(snap);
     }
 }
@@ -146,11 +192,41 @@ pub fn latest_voice() -> Option<VoiceSnap> {
     voice_slot().lock().ok().and_then(|g| g.clone())
 }
 
-/// Fresh SCRFD/skin look within the present consume window. No GazeSnap in PR1.
+/// Clone the latest gaze snap if it landed within `max_age_ms`.
+pub fn latest_gaze(now_ms: u64, max_age_ms: u64) -> Option<GazeSnap> {
+    let g = gaze_slot().lock().ok()?;
+    let snap = (*g).clone()?;
+    if now_ms.saturating_sub(snap.t_ms) <= max_age_ms {
+        Some(snap)
+    } else {
+        None
+    }
+}
+
+pub fn clear_gaze() {
+    if let Ok(mut g) = gaze_slot().lock() {
+        *g = None;
+    }
+}
+
+pub fn set_calib(calib: Option<GazeCalib>) {
+    CAM_MISMATCH_LOGGED.store(false, Ordering::Relaxed);
+    if let Ok(mut g) = calib_slot().lock() {
+        *g = calib;
+    }
+}
+
+#[cfg_attr(not(any(test, feature = "face")), allow(dead_code))]
+fn current_calib() -> Option<GazeCalib> {
+    calib_slot().lock().ok().and_then(|g| g.clone())
+}
+
+/// Fresh mesh/box gaze or SCRFD look within 400 ms.
 pub fn publishing_gaze() -> bool {
     #[cfg(feature = "face")]
     {
-        crate::identity::face::latest_look(now_ms(), crate::gaze::GAZE_GRACE_MS).is_some()
+        let now = now_ms();
+        latest_gaze(now, 400).is_some() || crate::identity::face::latest_look(now, 400).is_some()
     }
     #[cfg(not(feature = "face"))]
     {
@@ -171,6 +247,7 @@ pub fn screen_size() -> (u32, u32) {
 }
 
 pub fn set_gallery_kinds(kinds: &[String]) {
+    crate::identity::face::set_gallery_kinds(kinds);
     if let Ok(mut g) = kinds_slot().lock() {
         *g = kinds.to_vec();
     }
@@ -261,6 +338,7 @@ pub fn watch_vision_worker(now: u64) {
             eprintln!("buckyboi: vision worker died");
         }
         VISION_WORKER.store(false, Ordering::SeqCst);
+        clear_gaze();
     }
 }
 
@@ -302,6 +380,113 @@ fn vis_sleep_ms(spent_ms: u64, defer_voice: bool) -> u64 {
     } else {
         VISION_INFER_MS.saturating_sub(spent_ms)
     }
+}
+
+#[cfg(feature = "face")]
+fn log_gaze_kind(kind: GazeKind, extra: &str) {
+    let tag = match kind {
+        GazeKind::MeshCalibrated => 1u8,
+        GazeKind::MeshUncalibrated => 2,
+        GazeKind::FaceBox => 3,
+    };
+    if let Ok(mut g) = GAZE_LOGGED.lock() {
+        if *g != tag {
+            *g = tag;
+            match kind {
+                GazeKind::MeshCalibrated => {
+                    eprintln!("buckyboi: gaze: landmarker+calib {extra}");
+                }
+                GazeKind::MeshUncalibrated => {
+                    eprintln!("buckyboi: gaze: uncalibrated {extra}");
+                }
+                GazeKind::FaceBox => {
+                    eprintln!("buckyboi: gaze: face-box fallback {extra}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "face")]
+fn map_gaze(
+    now: u64,
+    frame: &crate::camera::CamFrame,
+    face: &crate::identity::scrfd::DetectedFace,
+) -> GazeSnap {
+    let (sw, sh) = screen_size();
+    let sw = sw as f32;
+    let sh = sh as f32;
+    let fw = frame.w as f32;
+    let fh = frame.h as f32;
+    let feat = crate::identity::gaze_track::infer(&frame.rgb, frame.w, frame.h, face);
+    let mut snap = GazeSnap {
+        t_ms: now,
+        sx: 0.0,
+        sy: 0.0,
+        kind: GazeKind::FaceBox,
+        iris_nx: feat.map(|f| f.iris_nx).unwrap_or(0.5),
+        iris_ny: feat.map(|f| f.iris_ny).unwrap_or(0.5),
+        nose_nx: feat.map(|f| f.nose_nx).unwrap_or(0.5),
+        nose_ny: feat.map(|f| f.nose_ny).unwrap_or(0.5),
+        iris_l: feat.map(|f| f.iris_l).unwrap_or(false),
+        iris_r: feat.map(|f| f.iris_r).unwrap_or(false),
+        ok: feat.map(|f| f.ok).unwrap_or(false),
+    };
+    if let Some(f) = feat.filter(|f| f.ok) {
+        snap.iris_nx = f.iris_nx;
+        snap.iris_ny = f.iris_ny;
+        snap.nose_nx = f.nose_nx;
+        snap.nose_ny = f.nose_ny;
+        snap.iris_l = f.iris_l;
+        snap.iris_r = f.iris_r;
+        snap.ok = true;
+        if sw > 1.0 && sh > 1.0 {
+            if let Some(c) = current_calib() {
+                if c.is_stale(sw as u32, sh as u32) {
+                    log_gaze_kind(GazeKind::MeshUncalibrated, "calib stale (screen)");
+                    let (sx, sy) = crate::gaze::uncalibrated(
+                        f.iris_nx, f.iris_ny, f.nose_nx, f.nose_ny, sw, sh,
+                    );
+                    snap.sx = sx;
+                    snap.sy = sy;
+                    snap.kind = GazeKind::MeshUncalibrated;
+                    return snap;
+                }
+                if c.camera != crate::identity::gaze_calib::camera_label()
+                    && !CAM_MISMATCH_LOGGED.swap(true, Ordering::Relaxed)
+                {
+                    eprintln!("buckyboi: gaze: camera path mismatch");
+                }
+                if let Some((sx, sy)) = c.apply(f.iris_nx, f.iris_ny, f.nose_nx, f.nose_ny) {
+                    log_gaze_kind(
+                        GazeKind::MeshCalibrated,
+                        &format!("rmse={:.0}px", c.rmse_px),
+                    );
+                    snap.sx = sx.clamp(0.0, sw.max(1.0));
+                    snap.sy = sy.clamp(0.0, sh.max(1.0));
+                    snap.kind = GazeKind::MeshCalibrated;
+                    return snap;
+                }
+            }
+            log_gaze_kind(GazeKind::MeshUncalibrated, "");
+            let (sx, sy) =
+                crate::gaze::uncalibrated(f.iris_nx, f.iris_ny, f.nose_nx, f.nose_ny, sw, sh);
+            snap.sx = sx;
+            snap.sy = sy;
+            snap.kind = GazeKind::MeshUncalibrated;
+            return snap;
+        }
+    }
+    log_gaze_kind(GazeKind::FaceBox, "");
+    let (sx, sy) = if sw > 1.0 && sh > 1.0 {
+        face_to_screen(face.cx(), face.cy(), fw, fh, sw, sh, true)
+    } else {
+        (0.0, 0.0)
+    };
+    snap.sx = sx;
+    snap.sy = sy;
+    snap.kind = GazeKind::FaceBox;
+    snap
 }
 
 #[cfg(any(feature = "face", feature = "hands", feature = "voice"))]
@@ -346,13 +531,16 @@ fn vision_loop() {
                 if rec_due {
                     last_rec_ms = now;
                 }
-                let (quality, embedding) =
-                    crate::identity::face::extract_parts(&frame.rgb, frame.w, frame.h, rec_due);
+                let (quality, embedding, face) =
+                    crate::identity::face::extract_detected(&frame.rgb, frame.w, frame.h, rec_due);
                 publish_face(FaceSnap {
                     t_ms: now,
                     quality,
                     embedding,
                 });
+                if let Some(face) = face {
+                    publish_gaze(map_gaze(now, frame, &face));
+                }
             }
 
             #[cfg(feature = "hands")]
@@ -546,5 +734,55 @@ mod tests {
         set_enrolling(EnrollKind::Face, false);
         set_enrolling(EnrollKind::Voice, true);
         set_enrolling(EnrollKind::Voice, false);
+    }
+
+    fn dummy_gaze(t_ms: u64) -> GazeSnap {
+        GazeSnap {
+            t_ms,
+            sx: 100.0,
+            sy: 200.0,
+            kind: GazeKind::FaceBox,
+            iris_nx: 0.4,
+            iris_ny: 0.5,
+            nose_nx: 0.5,
+            nose_ny: 0.5,
+            iris_l: true,
+            iris_r: true,
+            ok: true,
+        }
+    }
+
+    #[test]
+    fn latest_gaze_respects_max_age_and_clear() {
+        publish_gaze(dummy_gaze(1_000));
+        let got = latest_gaze(1_000, 400).expect("fresh");
+        assert_eq!(got.t_ms, 1_000);
+        assert!((got.sx - 100.0).abs() < 1e-3);
+        assert!(latest_gaze(1_400, 400).is_some());
+        assert!(latest_gaze(1_401, 400).is_none());
+        clear_gaze();
+        assert!(latest_gaze(1_000, 400).is_none());
+        assert!(latest_gaze(1_401, 400).is_none());
+    }
+
+    #[test]
+    fn set_calib_roundtrip() {
+        let c = GazeCalib {
+            version: 1,
+            screen_w: 1920,
+            screen_h: 1054,
+            camera: "/dev/video0".into(),
+            model: "face_landmarker".into(),
+            points: 5,
+            affine: Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+            ridge_w: None,
+            rmse_px: 12.0,
+            created_ms: 0,
+        };
+        set_calib(Some(c.clone()));
+        let got = current_calib().expect("set");
+        assert_eq!(got.rmse_px, 12.0);
+        set_calib(None);
+        assert!(current_calib().is_none());
     }
 }

@@ -7,10 +7,11 @@ use buckyboi::display::{
 };
 use buckyboi::face_to_screen;
 use buckyboi::identity::{
-    env_flag, env_flag_alias, env_or_alias, hands, latest_face, latest_hand, latest_look,
-    latest_voice, reload_rec, set_enrolling, set_gallery_kinds, set_screen, skip_on_enroll_fail,
-    start_mic, start_vision_worker, voice, watch_vision_worker, wizard_auto_skip, FirstRunWizard,
-    HandStatus, WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
+    camera_label, env_flag, env_flag_alias, env_or_alias, hands, latest_face, latest_gaze,
+    latest_hand, latest_look, latest_voice, reload_rec, set_calib, set_enrolling,
+    set_gallery_kinds, set_screen, skip_on_enroll_fail, start_mic, start_vision_worker, voice,
+    watch_vision_worker, wizard_auto_skip, CalibEvent, CalibFeat, FirstRunWizard, GazeCalib,
+    GazeCalibSession, HandStatus, WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
 };
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
@@ -56,11 +57,20 @@ fn hud_from(
     enroll: &EnrollSession,
     wizard: &FirstRunWizard,
     now: u64,
+    calib: &GazeCalibSession,
+    calib_stale: bool,
 ) -> IdentityHud {
     let face_chip = if wizard.using_largest_face() {
         LARGEST_FACE_CHIP.into()
     } else if latest_look(now, 400).map(|l| l.faces).unwrap_or(0) > 1 {
         LARGEST_FACE_CHIP.into()
+    } else {
+        String::new()
+    };
+    let gaze_calib_hint = if calib.open {
+        calib.hint().to_string()
+    } else if calib_stale {
+        "RECALIBRATE".into()
     } else {
         String::new()
     };
@@ -78,6 +88,11 @@ fn hud_from(
         wizard_can_next: wizard.can_next(),
         wizard_can_add: wizard.can_add_another(),
         face_chip,
+        gaze_calib_open: calib.open,
+        gaze_calib_hint,
+        gaze_calib_progress: calib.progress(),
+        gaze_calib_idx: calib.current_idx(),
+        gaze_calib_n: calib.n_dots(),
     }
 }
 
@@ -305,6 +320,65 @@ fn apply_identity_action(
     }
 }
 
+fn gaze_calib_stale(sw: u32, sh: u32) -> bool {
+    GazeCalib::load()
+        .map(|c| c.is_stale(sw, sh))
+        .unwrap_or(false)
+}
+
+fn close_gaze_calib(
+    menu: &mut RadialMenu,
+    calib: &mut GazeCalibSession,
+    sw: u32,
+    sh: u32,
+    calib_stale: &mut bool,
+) {
+    calib.cancel();
+    menu.calib_open = false;
+    menu.freeze_ms = None;
+    *calib_stale = gaze_calib_stale(sw, sh);
+}
+
+fn finish_gaze_calib(
+    obs: &[buckyboi::identity::CalibObs],
+    sw: u32,
+    sh: u32,
+    menu: &mut RadialMenu,
+    calib: &mut GazeCalibSession,
+    ux: &mut BuddyUx,
+    settings: &Settings,
+    now: u64,
+    calib_stale: &mut bool,
+) {
+    let cam = camera_label();
+    let fitted = if calib.n_dots() == 9 {
+        buckyboi::identity::from_ridge(obs, sw, sh, &cam)
+    } else {
+        buckyboi::identity::from_affine(obs, sw, sh, &cam)
+    };
+    menu.calib_open = false;
+    menu.freeze_ms = None;
+    calib.open = false;
+    if let Some(c) = fitted {
+        let rmse = c.rmse_px;
+        if c.save() {
+            set_calib(Some(c));
+            *calib_stale = false;
+            eprintln!("buckyboi: gaze: landmarker+calib rmse={rmse:.0}px");
+        } else {
+            *calib_stale = gaze_calib_stale(sw, sh);
+            eprintln!("buckyboi: gaze calib save failed — previous file kept");
+        }
+    } else {
+        *calib_stale = gaze_calib_stale(sw, sh);
+        eprintln!("buckyboi: gaze calib rejected (RMSE) — previous file kept");
+    }
+    let listen_ms = listen_override_ms().unwrap_or(settings.listen_ms as u64);
+    if ux.phase == Phase::Listening {
+        ux.listen_until_ms = now + listen_ms;
+    }
+}
+
 fn person_target(profiles: &mut ProfileStore, settings: &Settings) -> (String, Option<String>) {
     if let Some(p) = profiles.people().get(settings.selected_person) {
         return (p.name.clone(), Some(p.id.clone()));
@@ -449,6 +523,13 @@ fn apply_wizard_event(
             eprintln!("buckyboi: wizard cancelled");
         }
     }
+}
+
+fn enroll_blocks_hide(enroll: &EnrollSession) -> bool {
+    !matches!(
+        enroll.phase,
+        EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+    )
 }
 
 fn settle_enroll(
@@ -653,6 +734,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_voice_ms = 0u64;
     let mut last_face_ms = 0u64;
     let mut last_gesture_action_ms = 0u64;
+    let mut gaze_calib = GazeCalibSession::new();
+    let mut calib_stale = gaze_calib_stale(sw as u32, sh as u32);
 
     let mut gaze_drive = match env_or_alias("BUCKYBOI_GAZE_SIM", "BUDDY_GAZE_SIM").as_deref() {
         Some("mouse") => {
@@ -730,6 +813,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.sw = sw as f32;
             state.sh = sh as f32;
             set_screen(sw as u32, sh as u32);
+            calib_stale = gaze_calib_stale(sw as u32, sh as u32);
         }
 
         let mut input: FrameInput = backend.poll_input()?;
@@ -777,6 +861,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &mut menu,
                     now,
                 );
+            } else if menu.calib_open {
+                close_gaze_calib(
+                    &mut menu,
+                    &mut gaze_calib,
+                    sw as u32,
+                    sh as u32,
+                    &mut calib_stale,
+                );
+                eprintln!("buckyboi: gaze calib cancelled");
             } else {
                 break;
             }
@@ -822,7 +915,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             eprintln!("buckyboi: listening… (gesture palm)");
                         }
                     }
-                    GestureAction::Dismiss => {
+                    GestureAction::Dismiss
+                        if !menu.panel_open() && !enroll_blocks_hide(&enroll) =>
+                    {
                         ux.phase = Phase::Hidden;
                         eprintln!("buckyboi: dismiss (gesture)");
                     }
@@ -845,18 +940,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let mut gaze_pt: Option<(f32, f32)> = None;
+        let gaze_snap = latest_gaze(now, 400);
         match &gaze_drive {
             GazeDrive::Off => {}
             GazeDrive::Camera(rx) => {
-                while let Ok(s) = rx.try_recv() {
-                    gaze_smooth.push(s.x, s.y, s.t_ms);
-                }
-                if let Some(look) = latest_look(now, 220) {
+                if let Some(g) = gaze_snap.as_ref() {
+                    gaze_pt = Some(gaze_smooth.push(g.sx, g.sy, g.t_ms));
+                } else if let Some(look) = latest_look(now, 220) {
                     let (sx, sy) = face_to_screen(
                         look.cx, look.cy, look.fw, look.fh, sw as f32, sh as f32, true,
                     );
                     gaze_pt = Some(gaze_smooth.push(sx, sy, now));
                 } else {
+                    while let Ok(s) = rx.try_recv() {
+                        gaze_smooth.push(s.x, s.y, s.t_ms);
+                    }
                     gaze_pt = gaze_smooth.current(now);
                 }
             }
@@ -984,7 +1082,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gaze_lock.update(now, false);
                     }
                 }
-                if ux.phase == Phase::VisibleIdle {
+                if menu.calib_open {
+                    spin(&mut state);
+                } else if ux.phase == Phase::VisibleIdle {
                     step_overlay_avoid(&mut state, mx, my, ux.dragging, gaze_pt);
                 } else {
                     spin(&mut state);
@@ -992,6 +1092,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Phase::Listening => {
                 spin(&mut state);
+                if menu.calib_open {
+                    let feat = gaze_snap.as_ref().map(|g| CalibFeat {
+                        iris_nx: g.iris_nx,
+                        iris_ny: g.iris_ny,
+                        nose_nx: g.nose_nx,
+                        nose_ny: g.nose_ny,
+                        both_irises: g.iris_l && g.iris_r,
+                    });
+                    match gaze_calib.tick(now, feat, sw as f32, sh as f32) {
+                        CalibEvent::None => {}
+                        CalibEvent::Finished(obs) => {
+                            finish_gaze_calib(
+                                &obs,
+                                sw as u32,
+                                sh as u32,
+                                &mut menu,
+                                &mut gaze_calib,
+                                &mut ux,
+                                &settings,
+                                now,
+                                &mut calib_stale,
+                            );
+                        }
+                        CalibEvent::Failed => {
+                            close_gaze_calib(
+                                &mut menu,
+                                &mut gaze_calib,
+                                sw as u32,
+                                sh as u32,
+                                &mut calib_stale,
+                            );
+                            eprintln!("buckyboi: gaze calib failed — previous file kept");
+                        }
+                    }
+                }
                 if ev_release || (!button && prev_button) {
                     let act = click_listening_ex(
                         &mut menu,
@@ -1156,6 +1291,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 now,
                             );
                         }
+                        RadialAction::StartGazeCalib => {
+                            let enroll_idle = matches!(enroll.phase, EnrollPhase::Idle);
+                            if ux.phase == Phase::Listening
+                                && settings.camera
+                                && enroll_idle
+                                && !wizard.is_open()
+                            {
+                                menu.calib_open = true;
+                                menu.settings_open = false;
+                                menu.freeze_ms = Some(now);
+                                gaze_calib.begin(now);
+                                eprintln!("buckyboi: gaze calib — look at the dots");
+                            }
+                        }
+                        RadialAction::CancelGazeCalib => {
+                            close_gaze_calib(
+                                &mut menu,
+                                &mut gaze_calib,
+                                sw as u32,
+                                sh as u32,
+                                &mut calib_stale,
+                            );
+                            eprintln!("buckyboi: gaze calib cancelled");
+                        }
+                        RadialAction::SkipGazeCalib => match gaze_calib.skip_current(now) {
+                            CalibEvent::Finished(obs) => {
+                                finish_gaze_calib(
+                                    &obs,
+                                    sw as u32,
+                                    sh as u32,
+                                    &mut menu,
+                                    &mut gaze_calib,
+                                    &mut ux,
+                                    &settings,
+                                    now,
+                                    &mut calib_stale,
+                                );
+                            }
+                            CalibEvent::Failed => {
+                                close_gaze_calib(
+                                    &mut menu,
+                                    &mut gaze_calib,
+                                    sw as u32,
+                                    sh as u32,
+                                    &mut calib_stale,
+                                );
+                                eprintln!("buckyboi: gaze calib failed — previous file kept");
+                            }
+                            CalibEvent::None => {}
+                        },
                         RadialAction::None
                         | RadialAction::ToggleNeedFace
                         | RadialAction::TabLook
@@ -1166,7 +1351,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         | RadialAction::CancelEnroll => {}
                     }
                 }
-                if !menu.panel_open() && ux.tick(now) == UxEvent::Hide {
+                if !menu.panel_open()
+                    && !enroll_blocks_hide(&enroll)
+                    && ux.tick(now) == UxEvent::Hide
+                {
                     ux.phase = Phase::Hidden;
                 }
                 if ux.phase == Phase::Hidden {
@@ -1208,7 +1396,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 0.0
             };
-            let hud = hud_from(&auth, &profiles, &settings, &enroll, &wizard, now);
+            let hud = hud_from(
+                &auth,
+                &profiles,
+                &settings,
+                &enroll,
+                &wizard,
+                now,
+                &gaze_calib,
+                calib_stale,
+            );
             let pixels = paint_rect(
                 &state, listening, pulse, dwell, &menu, &settings, &hud, mx, my, now, sw as f32,
                 sh as f32, rect,

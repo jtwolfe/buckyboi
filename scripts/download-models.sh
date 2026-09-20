@@ -11,9 +11,10 @@
 #   Hands: MediaPipe (Apache-2.0) via OpenCV zoo ONNX conversions.
 #
 # Env:
-#   BUCKYBOI_MODELS_ZH=1   also fetch the Chinese ERes2Net speaker net
-#   BUCKYBOI_SKIP_HANDS=1  skip palm / landmark (they are optional)
-#   BUCKYBOI_FACE_R50=1    also fetch w600k_r50.onnx (~174MB). Default rec is mbf.
+#   BUCKYBOI_MODELS_ZH=1       also fetch the Chinese ERes2Net speaker net
+#   BUCKYBOI_SKIP_HANDS=1      skip palm / landmark (they are optional)
+#   BUCKYBOI_FACE_R50=1        also fetch w600k_r50.onnx (~174MB). Default rec is mbf.
+#   BUCKYBOI_SKIP_GAZE_MESH=1  skip 478-pt face landmarker (iris gaze)
 
 set -euo pipefail
 
@@ -43,6 +44,30 @@ gh_release() {
   fi
   echo "GET $url"
   curl -fL --retry 3 -o "$out.part" "$url"
+  mv "$out.part" "$out"
+}
+
+# curl to .part, sha256, then mv. Mismatch → delete .part, do not install.
+gh_release_sha() {
+  local url="$1"
+  local out="$DEST/$2"
+  local want="$3"
+  if [[ -f "$out" ]]; then
+    echo "have $out"
+    return 0
+  fi
+  echo "GET $url"
+  curl -fL --retry 3 -o "$out.part" "$url" || {
+    rm -f "$out.part"
+    return 1
+  }
+  local got
+  got="$(sha256sum "$out.part" | awk '{print $1}')"
+  if [[ "$got" != "$want" ]]; then
+    echo "warn: sha256 mismatch for $2 (got $got want $want) — not installing"
+    rm -f "$out.part"
+    return 1
+  fi
   mv "$out.part" "$out"
 }
 
@@ -94,6 +119,18 @@ if [[ "${BUCKYBOI_SKIP_HANDS:-0}" == "0" ]]; then
     || echo "warn: hand_landmark.onnx missing — drop a 224×224 landmark ONNX here"
 else
   echo "skip hands (BUCKYBOI_SKIP_HANDS=1)"
+fi
+
+echo
+echo "Gaze — MediaPipe Face Landmarker 478-pt iris (yakhyo ONNX, Apache-2.0)."
+if [[ "${BUCKYBOI_SKIP_GAZE_MESH:-0}" == "0" ]]; then
+  gh_release_sha \
+    "https://github.com/yakhyo/mediapipe-face-mesh-onnx/releases/download/weights/face_landmarker_Nx3x256x256.onnx" \
+    "face_landmarker.onnx" \
+    "111795f8703cdeb6d0c68a9f3cc966a0f23f8786bb00f4577a11f461fc4276ac" \
+    || echo "warn: face_landmarker.onnx missing — gaze stays face-box / skin proxy"
+else
+  echo "skip gaze mesh (BUCKYBOI_SKIP_GAZE_MESH=1)"
 fi
 
 echo

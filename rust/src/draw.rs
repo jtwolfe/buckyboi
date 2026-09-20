@@ -267,10 +267,10 @@ pub fn text(
 }
 
 use crate::radial::{
-    camera_hit, cancel_enroll_hit, close_button, del_btn, gate_hit, icon_centers, id_btn,
-    need_face_hit, new_btn, panel_rect, person_row_hit, slider_track, tab_look_hit, tab_people_hit,
-    wizard_add_hit, wizard_next_hit, wizard_skip_hit, IconId, IdentityHud, RadialMenu, Settings,
-    SettingsPage, CLOSE_R, ICON_RADIUS, PANEL_H, PANEL_W,
+    calib_chip_centers, calib_hit, camera_hit, cancel_enroll_hit, close_button, del_btn, gate_hit,
+    icon_centers, id_btn, need_face_hit, new_btn, panel_rect, person_row_hit, slider_track,
+    tab_look_hit, tab_people_hit, wizard_add_hit, wizard_next_hit, wizard_skip_hit, IconId,
+    IdentityHud, RadialMenu, Settings, SettingsPage, CLOSE_R, ICON_RADIUS, PANEL_H, PANEL_W,
 };
 
 pub fn paint_icon(
@@ -893,6 +893,17 @@ pub fn paint_panel(
         st,
         &format!("{:.1}", settings.stroke),
     );
+    let calib_on = hud.gaze_calib_open || hud.gaze_calib_hint == "RECALIBRATE";
+    paint_btn(
+        buf,
+        w,
+        h,
+        calib_hit(px, py),
+        off_x,
+        off_y,
+        "CALIB",
+        calib_on,
+    );
     let _ = (pw, ph);
 }
 
@@ -971,7 +982,7 @@ pub fn paint_listening_chrome(
             off_y,
         );
     }
-    if menu.panel_open() {
+    if menu.settings_open || menu.wizard_open {
         if let Some((_, sx, sy)) = centers
             .iter()
             .copied()
@@ -981,6 +992,127 @@ pub fn paint_listening_chrome(
             paint_panel(buf, w, h, px, py, settings, hud, off_x, off_y);
         }
     }
+    if menu.calib_open || hud.gaze_calib_open {
+        paint_gaze_calib(buf, w, h, cx, cy, hud, screen_w, screen_h, off_x, off_y);
+    }
+}
+
+fn paint_gaze_calib(
+    buf: &mut [u8],
+    w: u16,
+    h: u16,
+    cx: f32,
+    cy: f32,
+    hud: &IdentityHud,
+    screen_w: f32,
+    screen_h: f32,
+    off_x: f32,
+    off_y: f32,
+) {
+    let n = if hud.gaze_calib_n == 9 { 9 } else { 5 };
+    for i in 0..n {
+        let (dx, dy) = crate::identity::dot_pos(i, n, screen_w, screen_h);
+        let hot = i == hud.gaze_calib_idx;
+        let rad = if hot { 14.0 } else { 9.0 };
+        fill_disk(
+            buf,
+            w,
+            h,
+            dx - off_x,
+            dy - off_y,
+            rad + 2.0,
+            0x0C,
+            0x14,
+            0x1C,
+            220,
+        );
+        fill_disk(
+            buf,
+            w,
+            h,
+            dx - off_x,
+            dy - off_y,
+            rad,
+            if hot { 0x7E } else { 0x3A },
+            if hot { 0xE8 } else { 0x48 },
+            if hot { 0xFF } else { 0x58 },
+            240,
+        );
+        if hot && hud.gaze_calib_progress > 0.02 {
+            let p = hud.gaze_calib_progress.clamp(0.0, 1.0);
+            fill_disk(
+                buf,
+                w,
+                h,
+                dx - off_x,
+                dy - off_y,
+                rad * p,
+                0xF4,
+                0xFB,
+                0xFF,
+                200,
+            );
+        }
+    }
+    let hint: String = hud.gaze_calib_hint.chars().take(16).collect();
+    if !hint.is_empty() {
+        let tw = (hint.len() as i32 * 8).max(24);
+        let x = (cx - off_x).round() as i32 - tw / 2;
+        let y = (cy - off_y + 86.0).round() as i32;
+        fill_rect(buf, w, h, x - 4, y - 3, tw + 8, 14, 0x12, 0x18, 0x22, 230);
+        text(buf, w, h, x, y, &hint, 2, 0x7E, 0xE8, 0xFF, 250);
+    }
+    let ((sx, sy), (cx_, cy_)) = calib_chip_centers(cx, cy);
+    fill_disk(
+        buf,
+        w,
+        h,
+        sx - off_x,
+        sy - off_y,
+        ICON_RADIUS,
+        0x2A,
+        0x3A,
+        0x48,
+        240,
+    );
+    fill_disk(
+        buf,
+        w,
+        h,
+        cx_ - off_x,
+        cy_ - off_y,
+        ICON_RADIUS,
+        0x2A,
+        0x3A,
+        0x48,
+        240,
+    );
+    text(
+        buf,
+        w,
+        h,
+        (sx - off_x - 14.0).round() as i32,
+        (sy - off_y - 4.0).round() as i32,
+        "SKIP",
+        2,
+        0xE8,
+        0xF4,
+        0xFC,
+        250,
+    );
+    text(
+        buf,
+        w,
+        h,
+        (cx_ - off_x - 22.0).round() as i32,
+        (cy_ - off_y - 4.0).round() as i32,
+        "CANCEL",
+        2,
+        0xE8,
+        0xF4,
+        0xFC,
+        250,
+    );
 }
 
 /// Paint the buddy (and listening chrome) into a software ARGB buffer.

@@ -200,6 +200,14 @@ impl WaylandDisplay {
     ) -> Result<(), Box<dyn std::error::Error>> {
         pump(&self.conn, &mut self.event_queue, &mut self.app, 0)?;
         self.app.hidden = false;
+        if !self.app.configured {
+            // After an unmap (`attach(None)`), wlroots rejects the next buffer
+            // until a fresh layer-surface configure. Commit without a buffer
+            // and wait for `configure` on a later frame.
+            self.app.layer.commit();
+            self.conn.flush()?;
+            return Ok(());
+        }
         let qh = self.event_queue.handle();
         apply_hits(&self.app, &qh, hits);
         commit_pixels(&mut self.app, pixels, origin)?;
@@ -212,11 +220,17 @@ impl WaylandDisplay {
         self.app.hidden = true;
         let qh = self.event_queue.handle();
         apply_hits(&self.app, &qh, &[]);
-        // No released slot required — same as shutdown.
+        // Prefer a transparent buffer (still mapped). `attach(None)` unmaps the
+        // layer surface and Hyprland then requires a new configure before the
+        // next buffer — that is the wake crash.
+        if commit_clear(&mut self.app)? {
+            self.conn.flush()?;
+            return Ok(());
+        }
         self.app.layer.wl_surface().attach(None, 0, 0);
         self.app.layer.commit();
-        self.app.buf_rect = [None, None];
-        self.app.prev_rect = None;
+        self.app.configured = false;
+        drop_slots(&mut self.app);
         self.conn.flush()?;
         Ok(())
     }
@@ -393,18 +407,18 @@ fn attach_slot(app: &mut WaylandApp, i: usize) -> bool {
     buf.attach_to(surface).is_ok()
 }
 
-fn commit_clear(app: &mut WaylandApp) -> Result<(), Box<dyn std::error::Error>> {
+fn commit_clear(app: &mut WaylandApp) -> Result<bool, Box<dyn std::error::Error>> {
     let w = app.width.max(1);
     let h = app.height.max(1);
     let Some(i) = pick_released(app)? else {
-        return Ok(());
+        return Ok(false);
     };
     if !paint_slot(app, i, None, (0, 0, 0, 0), None) {
-        return Ok(());
+        return Ok(false);
     }
     if !attach_slot(app, i) {
         app.buf_rect[i] = None;
-        return Ok(());
+        return Ok(false);
     }
     app.layer
         .wl_surface()
@@ -412,7 +426,7 @@ fn commit_clear(app: &mut WaylandApp) -> Result<(), Box<dyn std::error::Error>> 
     app.layer.commit();
     app.buf_rect[i] = Some((0, 0, 0, 0));
     app.prev_rect = None;
-    Ok(())
+    Ok(true)
 }
 
 fn commit_pixels(

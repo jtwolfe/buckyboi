@@ -461,18 +461,19 @@ pub fn probe_embed(rgb: &[u8], w: u32, h: u32, bbox: FaceBox) -> Embedding {
 
 /// Extract an embedding. Prefers detect → align → ArcFace when models exist.
 pub fn extract_embedding(rgb: &[u8], w: u32, h: u32) -> (FaceQuality, Option<Embedding>) {
-    extract_parts(rgb, w, h, true)
+    let (q, e, _) = extract_detected(rgb, w, h, true);
+    (q, e)
 }
 
 /// Detect + quality + look publish. ArcFace / probe only when `want_embed`.
-pub fn extract_parts(
+pub fn extract_detected(
     rgb: &[u8],
     w: u32,
     h: u32,
     want_embed: bool,
-) -> (FaceQuality, Option<Embedding>) {
+) -> (FaceQuality, Option<Embedding>, Option<DetectedFace>) {
     let (n, Some(face)) = detect_counted(rgb, w, h) else {
-        return (FaceQuality::reject(FaceReject::NoFace), None);
+        return (FaceQuality::reject(FaceReject::NoFace), None, None);
     };
     let (crop, aligned) = crop_for_quality(rgb, w, h, &face);
     let mut q = quality_from_crop(&crop, face.bbox, w, h, n);
@@ -486,24 +487,24 @@ pub fn extract_parts(
         faces: n,
     });
     if !q.ok {
-        return (q, None);
+        return (q, None, Some(face));
     }
     if !want_embed {
-        return (q, None);
+        return (q, None, Some(face));
     }
     let _ = aligned;
     #[cfg(feature = "face")]
     {
         if let Some(emb) = onnx_embed_aligned(&crop, aligned) {
-            return (q, Some(emb));
+            return (q, Some(emb), Some(face));
         }
     }
     if crate::identity::env_flag("BUCKYBOI_FACE_PROBE") {
-        return (q, Some(probe_embed(rgb, w, h, face.bbox)));
+        return (q, Some(probe_embed(rgb, w, h, face.bbox)), Some(face));
     }
     q.ok = false;
     q.reject = FaceReject::NoEmbed;
-    (q, None)
+    (q, None, Some(face))
 }
 
 #[cfg(feature = "face")]
@@ -521,6 +522,7 @@ mod onnx {
     struct Rec {
         session: ort::session::Session,
         name: String,
+        input: String,
     }
 
     static REC: Mutex<Option<Rec>> = Mutex::new(None);
@@ -551,6 +553,7 @@ mod onnx {
             .unwrap_or("arcface")
             .to_string();
         let sess = crate::identity::ort_sess::session_from_file(&path)?;
+        let input = sess.inputs().first()?.name().to_string();
         let kind = rec_embed_kind(&name);
         if kind == FACE_KIND_ARCFACE && gallery_has_r50(&kinds) {
             eprintln!(
@@ -566,6 +569,7 @@ mod onnx {
         *recg = Some(Rec {
             session: sess,
             name,
+            input,
         });
         Some(())
     }
@@ -578,8 +582,15 @@ mod onnx {
         let rec = g.as_mut()?;
         let flat = arcface_blob_bgr(aligned_rgb, ARCFACE_SIZE);
         let blob = Array4::from_shape_vec((1, 3, ARCFACE_SIZE, ARCFACE_SIZE), flat).ok()?;
-        let input = ort::value::Tensor::from_array(blob).ok()?;
-        let outputs = rec.session.run(ort::inputs![input]).ok()?;
+        let tensor = ort::value::Tensor::from_array(blob).ok()?;
+        let iname = rec.input.clone();
+        let outputs = match rec.session.run(ort::inputs![iname.as_str() => tensor]) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("buckyboi: ArcFace run failed ({e})");
+                return None;
+            }
+        };
         let mut data = None;
         for (_, v) in outputs.iter() {
             if let Ok((_shape, slice)) = v.try_extract_tensor::<f32>() {
@@ -609,12 +620,6 @@ pub fn loaded_rec_model_name() -> Option<String> {
 #[cfg(not(feature = "face"))]
 pub fn loaded_rec_model_name() -> Option<String> {
     None
-}
-
-/// Drop the ArcFace session so the next embed recommits.
-pub fn reload_rec() {
-    #[cfg(feature = "face")]
-    onnx::drop_rec();
 }
 
 #[cfg(test)]

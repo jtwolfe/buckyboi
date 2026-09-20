@@ -16,6 +16,11 @@ pub const GAZE_LEAVE_SLACK: f32 = 22.0;
 pub const GAZE_REPEL_RADIUS: f32 = 230.0;
 pub const GAZE_REPEL_STRENGTH: f32 = 1.55;
 pub const FACE_GAIN: f32 = 2.15;
+/// Uncalibrated iris-in-eye gain (v1, no PnP).
+pub const EYE_GAIN: f32 = 1.35;
+/// Nose vs frame center ≈ yaw proxy.
+pub const NOSE_GAIN_X: f32 = 0.55;
+pub const NOSE_GAIN_Y: f32 = 0.40;
 
 /// Deterministic 5–15 s gaze-follow window (same span as listen).
 pub fn gaze_lock_ms(seed: u64) -> u32 {
@@ -44,6 +49,22 @@ pub fn face_to_screen(
     }
     let sx = (0.5 + (nx - 0.5) * FACE_GAIN).clamp(0.03, 0.97) * screen_w;
     let sy = (0.5 + (ny - 0.5) * FACE_GAIN).clamp(0.03, 0.97) * screen_h;
+    (sx, sy)
+}
+
+/// 2D iris-in-eye + nose offset → screen. Used until 5-point calib exists.
+pub fn uncalibrated(
+    iris_nx: f32,
+    iris_ny: f32,
+    nose_nx: f32,
+    nose_ny: f32,
+    sw: f32,
+    sh: f32,
+) -> (f32, f32) {
+    let sx =
+        (0.5 + (0.5 - iris_nx) * EYE_GAIN + (0.5 - nose_nx) * NOSE_GAIN_X).clamp(0.03, 0.97) * sw;
+    let sy =
+        (0.5 + (iris_ny - 0.5) * EYE_GAIN + (nose_ny - 0.5) * NOSE_GAIN_Y).clamp(0.03, 0.97) * sh;
     (sx, sy)
 }
 
@@ -489,5 +510,38 @@ mod tests {
     fn empty_frame_has_no_face() {
         let rgb = vec![16u8; 40 * 30 * 3];
         assert!(estimate_face_rgb(&rgb, 40, 30).is_none());
+    }
+
+    #[test]
+    fn uncalibrated_eyes_only_moves_sx_with_nose_fixed() {
+        let (sx0, sy0) = uncalibrated(0.5, 0.5, 0.5, 0.5, 1920.0, 1080.0);
+        let (sx1, sy1) = uncalibrated(0.4, 0.5, 0.5, 0.5, 1920.0, 1080.0);
+        assert!(
+            (sy1 - sy0).abs() < 1e-3,
+            "nose fixed, iris x should not move sy"
+        );
+        assert!(
+            (sx1 - sx0).abs() > 20.0,
+            "eyes-only delta must move sx ({sx0} → {sx1})"
+        );
+        let (sx2, sy2) = uncalibrated(0.5, 0.4, 0.5, 0.5, 1920.0, 1080.0);
+        assert!((sx2 - sx0).abs() < 1e-3);
+        assert!((sy2 - sy0).abs() > 20.0);
+        assert!((sx0 - 960.0).abs() < 1.0 && (sy0 - 540.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn uncalibrated_camera_left_iris_matches_face_to_screen_mirror() {
+        // iris_nx is camera-space (0 = left). One mirror lives in uncalibrated.
+        let (iris_sx, _) = uncalibrated(0.2, 0.5, 0.5, 0.5, 1920.0, 1080.0);
+        let (face_sx, _) = face_to_screen(0.2 * 320.0, 120.0, 320.0, 240.0, 1920.0, 1080.0, true);
+        assert!(
+            iris_sx > 960.0,
+            "camera-left iris → screen right, got {iris_sx}"
+        );
+        assert!(
+            face_sx > 960.0,
+            "camera-left face → screen right, got {face_sx}"
+        );
     }
 }

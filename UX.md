@@ -17,7 +17,7 @@ VisibleIdle ──gaze-follow 5–15s──► Listening ──timeout──► 
 | Phase | What you see | Input |
 | --- | --- | --- |
 | `VisibleIdle` | Rotating wireframe. Soft-avoids **gaze** (or the mouse). Dwell ring. Auth chip (`ADA` / `UNKNOWN`). | Click-through except the buddy. Tap starts Listening *if the gate allows*. Drag relocates. |
-| `Listening` | Brighter wire + pulse. Radial icons. Settings: **UX** and **ID** tabs. First-run / add-person wizard or Settings ID enroll panel. | Icons + panel in the hit region. Timer **pauses** while Settings **or the first-run wizard** is open. |
+| `Listening` | Brighter wire + pulse. Radial icons. Settings: **UX** and **ID** tabs. First-run / add-person wizard or Settings ID enroll panel. Gaze **CALIB** dots (fullscreen paint). | Icons + panel in the hit region. Timer **pauses** while Settings, **gaze calib**, or the first-run wizard is open. |
 | `Hidden` | Overlay unmapped (X11) or transparent + empty `set_input_region` (Wayland) | **X11:** first root-pointer move (≥ 1 px) or keymap change. **Wayland / Hyprland:** cursorpos IPC, `buckyboi --wake`, SIGUSR1, or `SUPER+B`. |
 
 Esc quits from any phase on X11 (keymap poll, no grab). On Wayland, Esc
@@ -27,19 +27,27 @@ works after the layer has OnDemand keyboard focus (click the buddy);
 
 ## Gaze (prototype)
 
+This is a **laptop webcam look-target**, not a Tobii. After a 5-point
+calib expect **~3–6° / buddy-hit** (`HIT_RADIUS` = 100 px), not
+reading-gaze. Eyes moving with a still head should move the target.
+
 Pipeline, all local / offline:
 
-1. V4L2 capture (`/dev/video0` or `BUCKYBOI_CAMERA`) at ~320×240, YUYV or MJPEG.
-2. If `--features face` and `det_10g.onnx` are present, SCRFD supplies the
-   face box (largest / most central when several people are visible).
-   Otherwise: skin-colored blob (YCbCr) → face center; dark pixels in the
-   upper half → iris proxy.
-3. Face/iris mapped to screen with a gain and a horizontal **mirror**.
+1. V4L2 capture (`/dev/video0` or `BUCKYBOI_CAMERA`) — prefer 640×480,
+   else 320×240, YUYV or MJPEG.
+2. If `--features face` and `face_landmarker.onnx` are present: SCRFD
+   box (margin 0.25, optional 5-kps rotate) → 478-pt mesh → iris 468/473
+   in the eye box + nose tip 1. The **vision worker** maps to screen
+   (affine from `gaze_calib.json`, else uncalibrated 2D gains). Present
+   only smooths.
+3. Else if `det_10g.onnx`: SCRFD face box with `FACE_GAIN`. Skin-blob
+   iris proxy is the last fallback.
 4. Exponential smooth (`GAZE_SMOOTH` = 0.14). Hold last sample 280 ms if a frame misses.
 
 RGB frames are also stashed for face / hand identity. ONNX identity runs
 at ~12.5 Hz so the overlay can stay near 60 Hz. `BUCKYBOI_NO_CAMERA=1`
 or a failed open **falls back** to mouse-avoid + click-to-listen.
+`BUCKYBOI_GAZE_SIM=mouse|chase` bypasses the tracker.
 
 ### Gaze-follow lock
 
@@ -174,14 +182,20 @@ Four 17 px discs on a 122 px orbit:
 - **CAM** — enable/disable V4L gaze
 - **GATE** — cycle identity policy
 - **LISTEN** / **GAZE** / **STROKE** sliders
+- **CALIB** — 5-dot dwell (center, TL, TR, BR, BL, inset 10%). Stays
+  Listening; hide timer pauses; SKIP / CANCEL chips near the buddy.
+  Needs both irises on ≥ 8 snaps per point. Saves
+  `~/.config/buckyboi/gaze_calib.json` unless RMSE is worse than
+  `min(200 px, 15% of the short side)`. Screen-size mismatch → stale
+  (`RECALIBRATE`); previous file kept on Esc / cancel.
 
 Written to `~/.config/buckyboi/settings.ini`. Env overrides still win at startup.
 
 ## Listen timeout
 
 Default from settings / `listen_duration_ms`. `BUCKYBOI_LISTEN_MS` overrides.
-Hidden once the deadline hits **and** Settings / the first-run wizard
-is closed.
+Hidden once the deadline hits **and** Settings / gaze calib / the
+first-run wizard is closed.
 
 ## Wireframe strokes
 
