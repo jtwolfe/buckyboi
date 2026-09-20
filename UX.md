@@ -93,6 +93,9 @@ you stuck on `UNKNOWN` / Settings → ID:
    central, chip **USING LARGEST FACE**.
 3. **VOICE** — 3 utterances (`TOO SHORT` / `TOO QUIET`). Skip if no mic.
 4. **HANDS** — optional fist → palm → thumb → point → peace. Skip allowed.
+   Missing palm/landmark ONNX → **NO MODEL** (wizard skips remaining
+   holds). No palm in frame → **NO HAND**; ~6.4 s of continuous miss
+   skips so the wizard can continue. A fist after a flicker still enrolls.
 5. **Done** — if GATE is still OFF, suggest **FACE** (or **ANY** when
    voice was saved too). Auth chip shows the name. **ADD** starts
    another person.
@@ -118,8 +121,13 @@ Settings → **ID**:
 4. **VOICE** — “SAY PHRASE”. Three clips ≥ 1.2 s with enough energy
    (**TOO SHORT** / **TOO QUIET**). Prefer the English sherpa model
    when present. No mic → `BUCKYBOI_VOICE_SIM=1` (tone) for bringing up the wizard.
-5. **HAND** — guided holds, starting at **FIST**. Use `BUCKYBOI_HAND_SIM=fist`
-   (then `palm`, `thumb`, `point`, `peace`) without a camera.
+5. **HAND** — guided holds, starting at **FIST**. HUD **HOLD FIST** then
+   **FIST n/6** (16-char chip). Missing palm/landmark ONNX → **NO MODEL**
+   (fails immediately; the wizard skips hands). No palm in frame →
+   **NO HAND**; ~6.4 s of continuous miss fails so the wizard can skip.
+   A fist after a flicker still enrolls (`Ok` zeroes the reject cap).
+   Use `BUCKYBOI_HAND_SIM=fist` (then `palm`, `thumb`, `point`, `peace`)
+   without a camera.
 6. **DEL** removes that person. **CANCEL** aborts a running Settings enroll.
 7. **ADD** opens the same first-run wizard for another person.
 

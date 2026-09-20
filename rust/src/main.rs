@@ -8,9 +8,9 @@ use buckyboi::display::{
 use buckyboi::face_to_screen;
 use buckyboi::identity::{
     env_flag, env_flag_alias, env_or_alias, hands, latest_face, latest_hand, latest_look,
-    latest_voice, reload_rec, set_enrolling, set_gallery_kinds, set_screen, start_mic,
-    start_vision_worker, voice, watch_vision_worker, wizard_auto_skip, FirstRunWizard, HandStatus,
-    WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
+    latest_voice, reload_rec, set_enrolling, set_gallery_kinds, set_screen, skip_on_enroll_fail,
+    start_mic, start_vision_worker, voice, watch_vision_worker, wizard_auto_skip, FirstRunWizard,
+    HandStatus, WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
 };
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
@@ -220,13 +220,14 @@ fn identity_tick(
     }
 
     if enroll_capturing(enroll, EnrollKind::Gesture) {
-        if let Some(snap) = latest_hand() {
-            if now.saturating_sub(snap.t_ms) <= SNAP_FRESH_MS && snap.t_ms != *last_hand_ms {
+        match latest_hand() {
+            Some(snap)
+                if now.saturating_sub(snap.t_ms) <= SNAP_FRESH_MS && snap.t_ms != *last_hand_ms =>
+            {
                 *last_hand_ms = snap.t_ms;
-                if let HandStatus::Ok(hand) = snap.status {
-                    let _ = enroll.push_gesture(&hand.normalized());
-                }
+                let _ = enroll.apply_hand_status(&snap.status);
             }
+            _ => {}
         }
     }
 
@@ -478,7 +479,9 @@ fn settle_enroll(
         if let EnrollPhase::Failed { reason } = &enroll.phase {
             let reason = reason.clone();
             let kind = enroll.kind;
-            if wizard.is_open() && wizard_auto_skip(kind, &reason) {
+            if wizard.is_open()
+                && (wizard_auto_skip(kind, &reason) || skip_on_enroll_fail(kind, &reason))
+            {
                 *enroll = EnrollSession::idle();
                 apply_wizard_event(wizard.skip(), wizard, enroll, profiles, settings, menu, now);
                 continue;

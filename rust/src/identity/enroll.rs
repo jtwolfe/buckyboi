@@ -1,11 +1,14 @@
 //! Enrollment / calibration state machines (pure, no camera or mic).
 
 use crate::identity::embed::Embedding;
-use crate::identity::face::{FaceQuality, FACE_ENROLL_NEED};
-use crate::identity::hands::GestureClass;
+use crate::identity::face::{FaceQuality, FaceReject, FACE_ENROLL_NEED};
+use crate::identity::hands::{GestureClass, HandStatus};
 use crate::identity::voice::{
     VoiceQuality, VoiceReject, VOICE_ENROLL_NEED, VOICE_ENROLL_REJECT_CAP,
 };
+
+/// Continuous palm-miss ticks before gesture enroll fails (~6.4 s at 80 ms).
+pub const GESTURE_NO_HAND_CAP: u32 = 80;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnrollKind {
@@ -178,21 +181,59 @@ impl EnrollSession {
         self.started_ms > 0 && now.saturating_sub(self.started_ms) >= limit
     }
 
-    pub fn fail_now(&mut self, reason: impl Into<String>) {
+    pub fn cancel(&mut self) {
+        *self = Self::idle();
+    }
+
+    /// Immediate `Failed`. Missing palm ONNX (`NO MODEL`) uses this so the
+    /// wizard can skip instead of waiting on the reject cap.
+    pub fn fail_now(&mut self, reason: impl Into<String>) -> EnrollEvent {
+        if matches!(
+            self.phase,
+            EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+        ) {
+            return EnrollEvent::None;
+        }
         let reason = reason.into();
         if !matches!(&self.phase, EnrollPhase::Failed { reason: r } if r == &reason) {
             eprintln!("buckyboi: enroll failed ({reason})");
         }
+        self.last_reject = Some(reason.clone());
         self.phase = EnrollPhase::Failed { reason };
+        EnrollEvent::Failed
     }
 
-    pub fn note_reject(&mut self, hint: impl Into<String>) {
+    /// HUD reject (`NO HAND`). Caps at [`GESTURE_NO_HAND_CAP`] ticks; `Ok`
+    /// must zero `rejects` so a flicker does not burn fist enroll.
+    pub fn note_reject(&mut self, reason: &str) -> EnrollEvent {
+        if matches!(
+            self.phase,
+            EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+        ) {
+            return EnrollEvent::None;
+        }
+        self.begin_capture();
         self.rejects = self.rejects.saturating_add(1);
-        self.last_reject = Some(hint.into());
+        self.last_reject = Some(reason.to_string());
+        if self.rejects >= GESTURE_NO_HAND_CAP {
+            self.phase = EnrollPhase::Failed {
+                reason: reason.to_string(),
+            };
+            return EnrollEvent::Failed;
+        }
+        EnrollEvent::Rejected
     }
 
-    pub fn cancel(&mut self) {
-        *self = Self::idle();
+    /// Present-thread consume of a `HandSnap` during gesture enroll.
+    pub fn apply_hand_status(&mut self, status: &HandStatus) -> EnrollEvent {
+        if !matches!(self.kind, EnrollKind::Gesture) {
+            return EnrollEvent::None;
+        }
+        match status {
+            HandStatus::NoModel => self.fail_now("NO MODEL"),
+            HandStatus::NoHand => self.note_reject("NO HAND"),
+            HandStatus::Ok(h) => self.push_gesture(&h.normalized()),
+        }
     }
 
     pub fn push_face(&mut self, quality: FaceQuality, emb: Option<Embedding>) -> EnrollEvent {
@@ -200,9 +241,10 @@ impl EnrollSession {
             return EnrollEvent::None;
         }
         self.begin_capture();
-        if quality.reject == crate::identity::face::FaceReject::NoEmbed {
-            self.fail_now(quality.reject.hint());
-            return EnrollEvent::Failed;
+        // Missing ArcFace is `NoEmbed` (ok or not). Rec-skip snaps are
+        // ok + reject=None + no embedding — ignore, do not fail_now.
+        if quality.reject == FaceReject::NoEmbed {
+            return self.fail_now("NO MODEL");
         }
         if !quality.ok {
             self.note_reject(quality.reject.hint());
@@ -213,7 +255,6 @@ impl EnrollSession {
             return EnrollEvent::Rejected;
         }
         let Some(emb) = emb else {
-            // Live rec-skip leftover (ok quality, no vector) — do not burn the cap.
             return EnrollEvent::None;
         };
         self.last_reject = None;
@@ -278,6 +319,9 @@ impl EnrollSession {
             return EnrollEvent::Rejected;
         }
         self.begin_capture();
+        // Flicker must not burn the NO HAND cap; a late fist still enrolls.
+        self.rejects = 0;
+        self.last_reject = None;
         self.gesture_samples.push(landmarks.to_vec());
         self.sync_capturing();
         if self.gesture_samples.len() >= self.need {
@@ -538,5 +582,132 @@ mod tests {
         s.begin_capture_at(50);
         s.begin_capture();
         assert_eq!(s.started_ms, 50);
+    }
+
+    #[test]
+    fn face_no_embed_fails_now_rec_skip_ignored() {
+        let mut s = EnrollSession::start_face("Ada", None);
+        let no_model = FaceQuality {
+            ok: false,
+            reject: FaceReject::NoEmbed,
+            ..ok_face()
+        };
+        assert_eq!(s.push_face(no_model, None), EnrollEvent::Failed);
+        assert!(matches!(
+            s.phase,
+            EnrollPhase::Failed { ref reason } if reason == "NO MODEL"
+        ));
+        assert_eq!(s.hint(), "NO MODEL");
+
+        let mut skip = EnrollSession::start_face("Ada", None);
+        let rec_skip = FaceQuality {
+            ok: true,
+            reject: FaceReject::None,
+            ..ok_face()
+        };
+        assert_eq!(skip.push_face(rec_skip, None), EnrollEvent::None);
+        assert!(!matches!(skip.phase, EnrollPhase::Failed { .. }));
+        assert_eq!(skip.rejects, 0);
+        assert!(skip.accepted.is_empty());
+
+        let mut t = EnrollSession::start_face("Ada", None);
+        let no_face = FaceQuality {
+            ok: false,
+            reject: FaceReject::NoFace,
+            ..ok_face()
+        };
+        assert_eq!(t.push_face(no_face, None), EnrollEvent::Rejected);
+        assert!(!matches!(t.phase, EnrollPhase::Failed { .. }));
+        assert_eq!(t.hint(), "NO FACE");
+        assert_eq!(t.rejects, 1);
+        let dark = FaceQuality {
+            ok: false,
+            reject: FaceReject::TooDark,
+            ..ok_face()
+        };
+        assert_eq!(t.push_face(dark, None), EnrollEvent::Rejected);
+        assert_eq!(t.rejects, 2);
+        assert!(!matches!(t.phase, EnrollPhase::Failed { .. }));
+    }
+
+    #[test]
+    fn gesture_fail_now_no_model() {
+        let mut s = EnrollSession::start_gesture("Ada", None, GestureClass::Fist, 6);
+        assert_eq!(s.fail_now("NO MODEL"), EnrollEvent::Failed);
+        assert!(matches!(
+            s.phase,
+            EnrollPhase::Failed { ref reason } if reason == "NO MODEL"
+        ));
+        assert_eq!(s.hint(), "NO MODEL");
+        assert!(s.hint().len() <= 16);
+        assert_eq!(s.fail_now("NO MODEL"), EnrollEvent::None);
+    }
+
+    #[test]
+    fn fail_now_idle_is_noop() {
+        let mut s = EnrollSession::idle();
+        assert_eq!(s.fail_now("NO MODEL"), EnrollEvent::None);
+        assert_eq!(s.phase, EnrollPhase::Idle);
+    }
+
+    #[test]
+    fn gesture_note_reject_sets_hint_and_caps() {
+        let mut s = EnrollSession::start_gesture("Ada", None, GestureClass::Fist, 6);
+        assert_eq!(s.note_reject("NO HAND"), EnrollEvent::Rejected);
+        assert_eq!(s.last_reject.as_deref(), Some("NO HAND"));
+        assert_eq!(s.hint(), "NO HAND");
+        assert!(s.hint().len() <= 16);
+        for i in 2..GESTURE_NO_HAND_CAP {
+            assert_eq!(s.note_reject("NO HAND"), EnrollEvent::Rejected, "tick {i}");
+        }
+        assert_eq!(s.rejects, GESTURE_NO_HAND_CAP - 1);
+        assert_eq!(s.note_reject("NO HAND"), EnrollEvent::Failed);
+        assert!(matches!(
+            s.phase,
+            EnrollPhase::Failed { ref reason } if reason == "NO HAND"
+        ));
+        assert_eq!(s.hint(), "NO HAND");
+    }
+
+    #[test]
+    fn gesture_note_reject_resets_on_ok() {
+        let mut s = EnrollSession::start_gesture("Ada", None, GestureClass::Fist, 6);
+        for _ in 0..10 {
+            assert_eq!(s.note_reject("NO HAND"), EnrollEvent::Rejected);
+        }
+        assert_eq!(s.rejects, 10);
+        let lm = vec![0.0; 42];
+        assert_eq!(s.push_gesture(&lm), EnrollEvent::Accepted);
+        assert_eq!(s.rejects, 0);
+        assert!(s.last_reject.is_none());
+        assert_eq!(s.hint(), "FIST 1/6");
+        assert!(s.hint().len() <= 16);
+        for _ in 0..(GESTURE_NO_HAND_CAP - 1) {
+            assert_eq!(s.note_reject("NO HAND"), EnrollEvent::Rejected);
+        }
+        assert_eq!(s.note_reject("NO HAND"), EnrollEvent::Failed);
+    }
+
+    #[test]
+    fn apply_hand_status_no_model_no_hand_ok() {
+        let mut s = EnrollSession::start_gesture("Ada", None, GestureClass::Fist, 6);
+        assert_eq!(
+            s.apply_hand_status(&HandStatus::NoHand),
+            EnrollEvent::Rejected
+        );
+        assert_eq!(s.hint(), "NO HAND");
+        let hand = crate::identity::hands::synthetic(GestureClass::Fist);
+        assert_eq!(
+            s.apply_hand_status(&HandStatus::Ok(hand)),
+            EnrollEvent::Accepted
+        );
+        assert_eq!(s.rejects, 0);
+        assert_eq!(s.hint(), "FIST 1/6");
+        let mut t = EnrollSession::start_gesture("Ada", None, GestureClass::Fist, 6);
+        assert_eq!(
+            t.apply_hand_status(&HandStatus::NoModel),
+            EnrollEvent::Failed
+        );
+        assert_eq!(t.hint(), "NO MODEL");
     }
 }

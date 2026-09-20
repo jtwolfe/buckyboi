@@ -303,6 +303,18 @@ impl FirstRunWizard {
     }
 }
 
+/// Auto-skip this wizard step when enroll fails with these reasons.
+/// Hands `NO MODEL` / `NO HAND` timeout skip remaining holds. Face
+/// `NO MODEL` skips (VM without weights). Face lighting rejects do not.
+pub fn skip_on_enroll_fail(kind: EnrollKind, reason: &str) -> bool {
+    let r = reason.trim().to_ascii_uppercase();
+    match kind {
+        EnrollKind::Gesture => matches!(r.as_str(), "NO MODEL" | "NO HAND"),
+        EnrollKind::Face => r == "NO MODEL",
+        EnrollKind::Voice => false,
+    }
+}
+
 /// True while a first-run / add-person wizard is capturing, so hide-timer
 /// and Esc treat it like Settings.
 pub fn wizard_blocks_hide(wizard: &FirstRunWizard, enroll: &EnrollSession) -> bool {
@@ -481,6 +493,16 @@ mod tests {
         let mut w = FirstRunWizard::open("P1", true);
         assert_eq!(w.skip(), WizardEvent::None);
         assert_eq!(w.step, WizardStep::Name);
+    }
+
+    #[test]
+    fn skip_on_enroll_fail_hands_and_face_no_model() {
+        assert!(skip_on_enroll_fail(EnrollKind::Gesture, "NO MODEL"));
+        assert!(skip_on_enroll_fail(EnrollKind::Gesture, "NO HAND"));
+        assert!(skip_on_enroll_fail(EnrollKind::Face, "NO MODEL"));
+        assert!(!skip_on_enroll_fail(EnrollKind::Face, "NO FACE"));
+        assert!(!skip_on_enroll_fail(EnrollKind::Face, "TOO DARK"));
+        assert!(!skip_on_enroll_fail(EnrollKind::Voice, "NO MIC"));
     }
 
     #[test]
