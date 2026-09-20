@@ -181,10 +181,7 @@ mod tests {
     fn click_in_place_starts_listen() {
         let mut ux = BuddyUx::new();
         assert_eq!(ux.button_down(100.0, 100.0, 1000, true), UxEvent::None);
-        assert_eq!(
-            ux.button_up(101.0, 100.0, 1120, 3),
-            UxEvent::StartListen
-        );
+        assert_eq!(ux.button_up(101.0, 100.0, 1120, 3), UxEvent::StartListen);
         assert_eq!(ux.phase, Phase::Listening);
         assert!(ux.listen_until_ms > 1120);
     }

@@ -7,8 +7,9 @@ use buckyboi::display::{
 };
 use buckyboi::face_to_screen;
 use buckyboi::identity::{
-    env_flag, env_flag_alias, env_or_alias, extract_face, hands, latest_look, voice,
-    FirstRunWizard, WizardEvent, LARGEST_FACE_CHIP, VISION_INFER_MS,
+    env_flag, env_flag_alias, env_or_alias, hands, latest_face, latest_hand, latest_look,
+    reload_rec, set_enrolling, set_gallery_kinds, set_screen, start_vision_worker, voice,
+    watch_vision_worker, FirstRunWizard, HandStatus, WizardEvent, LARGEST_FACE_CHIP,
 };
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
@@ -18,7 +19,12 @@ use buckyboi::{
     Settings, SettingsPage, UxEvent, WizardHits, HIT_RADIUS,
 };
 use std::env;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const SNAP_FRESH_MS: u64 = 400;
+const GESTURE_ACTION_MS: u64 = 480;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -94,6 +100,8 @@ fn finish_enroll(enroll: &mut EnrollSession, profiles: &mut ProfileStore, settin
     match enroll.kind {
         EnrollKind::Face => {
             profiles.replace_face(&id, enroll.accepted.clone());
+            set_gallery_kinds(&profiles.face_kinds());
+            reload_rec();
             eprintln!(
                 "buckyboi: enrolled face for {name} ({} vectors)",
                 enroll.accepted.len()
@@ -141,6 +149,14 @@ fn synthetic_skin() -> (Vec<u8>, u32, u32) {
     (rgb, w, h)
 }
 
+fn enroll_capturing(enroll: &EnrollSession, kind: EnrollKind) -> bool {
+    enroll.kind == kind
+        && !matches!(
+            enroll.phase,
+            EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+        )
+}
+
 fn identity_tick(
     now: u64,
     profiles: &mut ProfileStore,
@@ -153,33 +169,29 @@ fn identity_tick(
     last_hand_ms: &mut u64,
 ) {
     auth.expire(now);
+    set_enrolling(EnrollKind::Face, enroll_capturing(enroll, EnrollKind::Face));
+    set_enrolling(
+        EnrollKind::Voice,
+        enroll_capturing(enroll, EnrollKind::Voice),
+    );
 
-    let frame = if env_flag("BUCKYBOI_FACE_SIM") {
+    if env_flag("BUCKYBOI_FACE_SIM") {
         let (rgb, w, h) = synthetic_skin();
-        Some(camera::CamFrame {
-            rgb,
+        camera::store_frame(camera::CamFrame {
+            rgb: Arc::from(rgb),
             w,
             h,
             t_ms: now,
-        })
-    } else {
-        camera::latest_frame()
-    };
+        });
+    }
 
-    if let Some(frame) = frame {
-        if now.saturating_sub(*last_face_ms) >= VISION_INFER_MS {
-            *last_face_ms = now;
-            let (_q, emb) = extract_face(&frame.rgb, frame.w, frame.h);
-            wizard.note_faces(_q.faces);
-            if matches!(enroll.kind, EnrollKind::Face)
-                && !matches!(
-                    enroll.phase,
-                    EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
-                )
-            {
-                let ev = enroll.push_face(_q, emb.clone());
-                let _ = ev;
-            } else if let Some(emb) = emb {
+    if let Some(snap) = latest_face() {
+        if now.saturating_sub(snap.t_ms) <= SNAP_FRESH_MS && snap.t_ms != *last_face_ms {
+            *last_face_ms = snap.t_ms;
+            wizard.note_faces(snap.quality.faces);
+            if enroll_capturing(enroll, EnrollKind::Face) {
+                let _ = enroll.push_face(snap.quality, snap.embedding.clone());
+            } else if let Some(emb) = snap.embedding {
                 if let Some(hit) = profiles.match_face(&emb) {
                     auth.note_face(&hit.person_id, &hit.name, now, hit.score);
                 }
@@ -187,13 +199,7 @@ fn identity_tick(
         }
     }
 
-    if matches!(enroll.kind, EnrollKind::Voice)
-        && !matches!(
-            enroll.phase,
-            EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
-        )
-        && now.saturating_sub(*last_voice_ms) >= 1_600
-    {
+    if enroll_capturing(enroll, EnrollKind::Voice) && now.saturating_sub(*last_voice_ms) >= 1_600 {
         *last_voice_ms = now;
         let samples = voice_samples();
         if !samples.is_empty() {
@@ -216,16 +222,13 @@ fn identity_tick(
         }
     }
 
-    if now.saturating_sub(*last_hand_ms) >= VISION_INFER_MS {
-        if let Some(hand) = current_hand() {
-            *last_hand_ms = now;
-            if matches!(enroll.kind, EnrollKind::Gesture)
-                && !matches!(
-                    enroll.phase,
-                    EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
-                )
-            {
-                let _ = enroll.push_gesture(&hand.normalized());
+    if enroll_capturing(enroll, EnrollKind::Gesture) {
+        if let Some(snap) = latest_hand() {
+            if now.saturating_sub(snap.t_ms) <= SNAP_FRESH_MS && snap.t_ms != *last_hand_ms {
+                *last_hand_ms = snap.t_ms;
+                if let HandStatus::Ok(hand) = snap.status {
+                    let _ = enroll.push_gesture(&hand.normalized());
+                }
             }
         }
     }
@@ -259,17 +262,6 @@ fn voice_samples_optional() -> Option<Vec<f32>> {
         return Some(voice_tone());
     }
     None
-}
-
-fn current_hand() -> Option<hands::HandLandmarks> {
-    if let Some(sim) = env::var("BUCKYBOI_HAND_SIM").ok() {
-        let cls = GestureClass::parse(&sim);
-        if cls != GestureClass::Unknown {
-            return Some(hands::synthetic(cls));
-        }
-    }
-    let frame = camera::latest_frame()?;
-    hands::extract_landmarks_onnx(&frame.rgb, frame.w, frame.h)
 }
 
 fn apply_identity_action(
@@ -498,12 +490,18 @@ fn maybe_gesture_action(
     profiles: &ProfileStore,
     auth: &AuthSession,
     settings: &Settings,
-    last_hand_ms: &mut u64,
+    last_gesture_action_ms: &mut u64,
 ) -> Option<GestureAction> {
-    if now.saturating_sub(*last_hand_ms) < 480 {
+    if now.saturating_sub(*last_gesture_action_ms) < GESTURE_ACTION_MS {
         return None;
     }
-    let hand = current_hand()?;
+    let snap = latest_hand()?;
+    if now.saturating_sub(snap.t_ms) > SNAP_FRESH_MS {
+        return None;
+    }
+    let HandStatus::Ok(hand) = snap.status else {
+        return None;
+    };
     if !auth.allows_gesture(settings.gate, settings.gestures_need_face, now) {
         return None;
     }
@@ -525,7 +523,7 @@ fn maybe_gesture_action(
         .and_then(|id| profiles.get(id))
         .map(|p| p.map())
         .unwrap_or(hands::DEFAULT_GESTURE_MAP);
-    *last_hand_ms = now;
+    *last_gesture_action_ms = now;
     Some(hands::action_for(cls, &map))
 }
 
@@ -618,6 +616,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut profiles = ProfileStore::load();
     profiles.file.face_threshold = profiles.file.face_threshold.max(0.15);
+    start_vision_worker(&profiles.face_kinds());
+    set_screen(sw as u32, sh as u32);
     let mut auth = AuthSession::new(8_000);
     let mut enroll = EnrollSession::idle();
     let mut wizard = FirstRunWizard::closed();
@@ -625,6 +625,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_hand_ms = 0u64;
     let mut last_voice_ms = 0u64;
     let mut last_face_ms = 0u64;
+    let mut last_gesture_action_ms = 0u64;
 
     let mut gaze_drive = match env_or_alias("BUCKYBOI_GAZE_SIM", "BUDDY_GAZE_SIM").as_deref() {
         Some("mouse") => {
@@ -701,6 +702,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sh = nh;
             state.sw = sw as f32;
             state.sh = sh as f32;
+            set_screen(sw as u32, sh as u32);
         }
 
         let mut input: FrameInput = backend.poll_input()?;
@@ -753,6 +755,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         prev_escape = input.escape;
 
         let now = now_ms();
+        watch_vision_worker(now);
         identity_tick(
             now,
             &mut profiles,
@@ -780,9 +783,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if matches!(enroll.phase, EnrollPhase::Idle) && !wizard.is_open() {
-            if let Some(gact) =
-                maybe_gesture_action(now, &profiles, &auth, &settings, &mut last_hand_ms)
-            {
+            if let Some(gact) = maybe_gesture_action(
+                now,
+                &profiles,
+                &auth,
+                &settings,
+                &mut last_gesture_action_ms,
+            ) {
                 match gact {
                     GestureAction::Listen if ux.phase == Phase::VisibleIdle => {
                         if auth.allows_listen(settings.gate, now) {
@@ -1023,13 +1030,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if settings.camera {
                                 if !matches!(gaze_drive, GazeDrive::Mouse | GazeDrive::Chase { .. })
                                 {
+                                    camera::CAM_STOP.store(false, Ordering::SeqCst);
                                     gaze_drive = match camera::start(sw as f32, sh as f32) {
                                         Some(rx) => GazeDrive::Camera(rx),
                                         None => GazeDrive::Off,
                                     };
                                 }
-                            } else if matches!(gaze_drive, GazeDrive::Camera(_)) {
-                                gaze_drive = GazeDrive::Off;
+                            } else {
+                                camera::CAM_STOP.store(true, Ordering::SeqCst);
+                                if matches!(gaze_drive, GazeDrive::Camera(_)) {
+                                    gaze_drive = GazeDrive::Off;
+                                }
                             }
                         }
                         RadialAction::SetListenMs(_)

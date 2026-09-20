@@ -4,7 +4,7 @@
 //! screen look-target, then smoothed. It is **not** research-grade eye tracking.
 //! Camera I/O lives in `camera.rs` (feature `gaze`). This module is pure.
 
-use crate::ux::{LISTEN_MAX_MS, LISTEN_MIN_MS, UxEvent};
+use crate::ux::{UxEvent, LISTEN_MAX_MS, LISTEN_MIN_MS};
 
 pub const GAZE_SMOOTH: f32 = 0.14;
 pub const GAZE_HOLD_MS: u64 = 280;

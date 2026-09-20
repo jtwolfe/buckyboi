@@ -9,11 +9,14 @@ pub mod enroll;
 pub mod face;
 pub mod gate;
 pub mod hands;
+#[cfg(any(feature = "face", feature = "hands"))]
+pub(crate) mod ort_sess;
 pub mod palm;
 pub mod persist;
 pub mod scrfd;
 pub mod voice;
 pub mod wizard;
+pub mod worker;
 
 pub use embed::*;
 pub use enroll::*;
@@ -23,8 +26,9 @@ pub use face::{
 };
 pub use gate::*;
 pub use hands::{
-    classify_gesture, classify_rules, classify_trained, extract_landmarks_onnx, gesture_centroid,
-    GestureAction, GestureClass, GestureMap, GestureSample, HandLandmarks, DEFAULT_GESTURE_MAP,
+    classify_gesture, classify_rules, classify_trained, extract_landmarks_onnx, extract_status,
+    gesture_centroid, models_present, GestureAction, GestureClass, GestureMap, GestureSample,
+    HandLandmarks, HandStatus, DEFAULT_GESTURE_MAP,
 };
 pub use persist::*;
 pub use voice::{
@@ -32,6 +36,10 @@ pub use voice::{
     VoiceReject, VOICE_ENROLL_NEED, VOICE_MIN_MS, VOICE_THRESHOLD_SHERPA,
 };
 pub use wizard::{FirstRunWizard, WizardEvent, WizardStep, LARGEST_FACE_CHIP};
+pub use worker::{
+    latest_face, latest_hand, publishing_gaze, reload_rec, set_enrolling, set_gallery_kinds,
+    set_screen, stamp_if_due, start_vision_worker, watch_vision_worker, FaceSnap, HandSnap,
+};
 
 /// Vision / identity ONNX cadence (~12.5 Hz) so the overlay stays at 60 Hz.
 pub const VISION_INFER_MS: u64 = 80;

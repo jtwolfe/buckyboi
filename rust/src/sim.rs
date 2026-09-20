@@ -31,12 +31,7 @@ pub const HI_X: f32 = (WIN_W as f32) - MARGIN - BOUND_RADIUS; // 680
 pub const LO_Y: f32 = MARGIN + BOUND_RADIUS; // 120
 pub const HI_Y: f32 = (WIN_H as f32) - MARGIN - BOUND_RADIUS; // 480
 
-pub const CORNERS: [(f32, f32); 4] = [
-    (LO_X, LO_Y),
-    (HI_X, LO_Y),
-    (HI_X, HI_Y),
-    (LO_X, HI_Y),
-];
+pub const CORNERS: [(f32, f32); 4] = [(LO_X, LO_Y), (HI_X, LO_Y), (HI_X, HI_Y), (LO_X, HI_Y)];
 
 const RAW: [(f32, f32, f32); 12] = [
     (0.0, -1.0, -PHI),
@@ -344,7 +339,12 @@ pub fn step_overlay_avoid(
     }
     s.button = false;
     let (ax, ay, radius, strength) = match gaze {
-        Some((gx, gy)) => (gx, gy, crate::gaze::GAZE_REPEL_RADIUS, crate::gaze::GAZE_REPEL_STRENGTH),
+        Some((gx, gy)) => (
+            gx,
+            gy,
+            crate::gaze::GAZE_REPEL_RADIUS,
+            crate::gaze::GAZE_REPEL_STRENGTH,
+        ),
         None => (mx, my, REPEL_RADIUS, REPEL_STRENGTH),
     };
     if !hit_test(s, ax, ay) {

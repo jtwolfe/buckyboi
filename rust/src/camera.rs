@@ -2,8 +2,9 @@
 //! Opening the device is best-effort: failure returns `None` and the overlay
 //! keeps mouse-avoid + click-to-listen.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Copy, Debug)]
 pub struct CamGaze {
@@ -14,11 +15,14 @@ pub struct CamGaze {
 
 #[derive(Clone, Debug)]
 pub struct CamFrame {
-    pub rgb: Vec<u8>,
+    pub rgb: Arc<[u8]>,
     pub w: u32,
     pub h: u32,
     pub t_ms: u64,
 }
+
+/// Camera loop checks each frame; `true` → break. Not `CamGaze` disconnect.
+pub static CAM_STOP: AtomicBool = AtomicBool::new(false);
 
 static LATEST: OnceLock<Mutex<Option<CamFrame>>> = OnceLock::new();
 
@@ -38,13 +42,14 @@ pub fn store_frame(frame: CamFrame) {
 
 /// Try to start a capture thread. `None` = no camera / permission / compile without `gaze`.
 pub fn start(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
+    CAM_STOP.store(false, Ordering::SeqCst);
     if crate::identity::env_flag_alias("BUCKYBOI_NO_CAMERA", "BUDDY_NO_CAMERA") {
         eprintln!("buckyboi: BUCKYBOI_NO_CAMERA set — skipping webcam");
         return None;
     }
     #[cfg(feature = "gaze")]
     {
-        return start_v4l(screen_w, screen_h);
+        start_v4l(screen_w, screen_h)
     }
     #[cfg(not(feature = "gaze"))]
     {
@@ -69,6 +74,52 @@ fn camera_path() -> String {
 }
 
 #[cfg(feature = "gaze")]
+fn env_dim(name: &str) -> Option<u32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| (16..=4096).contains(&n))
+}
+
+#[cfg(feature = "gaze")]
+fn negotiate_format(dev: &mut v4l::Device) -> Result<v4l::Format, String> {
+    use v4l::video::Capture;
+    use v4l::FourCC;
+
+    let yuyv = FourCC::new(b"YUYV");
+    let mjpg = FourCC::new(b"MJPG");
+    let mut candidates: Vec<(u32, u32, FourCC)> = Vec::new();
+    if let (Some(w), Some(h)) = (env_dim("BUCKYBOI_CAMERA_W"), env_dim("BUCKYBOI_CAMERA_H")) {
+        candidates.push((w, h, yuyv));
+        candidates.push((w, h, mjpg));
+    }
+    candidates.extend_from_slice(&[
+        (640, 480, yuyv),
+        (640, 480, mjpg),
+        (320, 240, yuyv),
+        (320, 240, mjpg),
+    ]);
+
+    let mut last_err = String::from("no format");
+    for (w, h, fcc) in candidates {
+        let mut fmt = match dev.format() {
+            Ok(f) => f,
+            Err(e) => return Err(format!("format: {e}")),
+        };
+        fmt.width = w;
+        fmt.height = h;
+        fmt.fourcc = fcc;
+        match dev.set_format(&fmt) {
+            Ok(_) => {
+                return dev.format().map_err(|e| format!("format: {e}"));
+            }
+            Err(e) => last_err = format!("set_format {w}x{h}: {e}"),
+        }
+    }
+    Err(last_err)
+}
+
+#[cfg(feature = "gaze")]
 fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
     use crate::gaze::{estimate_face_rgb, face_to_screen, yuyv_to_rgb};
     use std::sync::mpsc::{channel, sync_channel};
@@ -76,7 +127,6 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
     use std::time::Duration;
     use v4l::buffer::Type;
     use v4l::io::traits::CaptureStream;
-    use v4l::video::Capture;
     use v4l::{Device, FourCC};
 
     let path = camera_path();
@@ -93,35 +143,18 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
                     return;
                 }
             };
-            let mut fmt = match dev.format() {
+            let fmt = match negotiate_format(&mut dev) {
                 Ok(f) => f,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(format!("format: {e}")));
-                    return;
-                }
-            };
-            fmt.width = 320;
-            fmt.height = 240;
-            let yuyv = FourCC::new(b"YUYV");
-            let mjpg = FourCC::new(b"MJPG");
-            fmt.fourcc = yuyv;
-            if dev.set_format(&fmt).is_err() {
-                fmt.fourcc = mjpg;
-                if let Err(e) = dev.set_format(&fmt) {
-                    let _ = ready_tx.send(Err(format!("set_format: {e}")));
-                    return;
-                }
-            }
-            let fmt = match dev.format() {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(format!("format: {e}")));
+                    let _ = ready_tx.send(Err(e));
                     return;
                 }
             };
             let fourcc = fmt.fourcc;
             let fw = fmt.width;
             let fh = fmt.height;
+            let yuyv = FourCC::new(b"YUYV");
+            let mjpg = FourCC::new(b"MJPG");
             let mut stream =
                 match v4l::io::mmap::Stream::with_buffers(&mut dev, Type::VideoCapture, 4) {
                     Ok(s) => s,
@@ -139,6 +172,9 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
 
             let mut misses = 0u32;
             loop {
+                if CAM_STOP.load(Ordering::SeqCst) {
+                    break;
+                }
                 let (buf, _meta) = match stream.next() {
                     Ok(v) => v,
                     Err(e) => {
@@ -158,12 +194,17 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
                 if rgb.len() < (fw * fh * 3) as usize {
                     continue;
                 }
+                let rgb: Arc<[u8]> = Arc::from(rgb);
                 store_frame(CamFrame {
-                    rgb: rgb.clone(),
+                    rgb: Arc::clone(&rgb),
                     w: fw,
                     h: fh,
                     t_ms: now_ms(),
                 });
+                #[cfg(feature = "face")]
+                if crate::identity::publishing_gaze() {
+                    continue;
+                }
                 let Some(guess) = estimate_face_rgb(&rgb, fw, fh) else {
                     misses = misses.saturating_add(1);
                     if misses == 45 {
@@ -180,8 +221,9 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
                     y: sy,
                     t_ms: now_ms(),
                 }) {
-                    Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+                    Ok(())
+                    | Err(std::sync::mpsc::TrySendError::Full(_))
+                    | Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
                 }
             }
         })
@@ -212,5 +254,28 @@ fn decode_mjpeg(bytes: &[u8]) -> Vec<u8> {
     match image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg) {
         Ok(img) => img.to_rgb8().into_raw(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camframe_arc_clone_shares_buffer() {
+        let rgb: Arc<[u8]> = Arc::from(vec![9u8; 12]);
+        let a = CamFrame {
+            rgb: Arc::clone(&rgb),
+            w: 2,
+            h: 2,
+            t_ms: 7,
+        };
+        let b = a.clone();
+        assert!(Arc::ptr_eq(&a.rgb, &b.rgb));
+        assert_eq!(a.w, 2);
+        store_frame(a);
+        let got = latest_frame().expect("stored");
+        assert_eq!(got.t_ms, 7);
+        assert!(Arc::ptr_eq(&got.rgb, &rgb));
     }
 }
