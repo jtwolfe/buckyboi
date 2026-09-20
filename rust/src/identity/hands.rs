@@ -387,14 +387,6 @@ pub fn extract_status(rgb: &[u8], w: u32, h: u32) -> HandStatus {
     }
 }
 
-/// Thin wrapper for tests (`Ok` → `Some`).
-pub fn extract_landmarks_onnx(rgb: &[u8], w: u32, h: u32) -> Option<HandLandmarks> {
-    match extract_status(rgb, w, h) {
-        HandStatus::Ok(h) => Some(h),
-        _ => None,
-    }
-}
-
 #[cfg(feature = "hands")]
 mod onnx {
     use super::*;
@@ -669,7 +661,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!palm_files_present(&dir));
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = extract_status(&[0u8; 12], 2, 2);
     }
 
     #[test]

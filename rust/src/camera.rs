@@ -2,7 +2,7 @@
 //! Opening the device is best-effort: failure returns `None` and the overlay
 //! keeps mouse-avoid + click-to-listen.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -21,8 +21,10 @@ pub struct CamFrame {
     pub t_ms: u64,
 }
 
-/// Camera loop checks each frame; `true` → break. Not `CamGaze` disconnect.
+/// Camera loop checks each frame; `true` → camera is off. Not `CamGaze` disconnect.
 pub static CAM_STOP: AtomicBool = AtomicBool::new(false);
+/// Generation captured at spawn; the loop breaks if this no longer matches.
+static CAM_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 static LATEST: OnceLock<Mutex<Option<CamFrame>>> = OnceLock::new();
 
@@ -40,20 +42,36 @@ pub fn store_frame(frame: CamFrame) {
     }
 }
 
+pub fn clear_frame() {
+    if let Ok(mut g) = latest_slot().lock() {
+        *g = None;
+    }
+}
+
+/// Invalidate the running capture thread and drop the RGB slot.
+pub fn request_stop() {
+    CAM_STOP.store(true, Ordering::SeqCst);
+    CAM_EPOCH.fetch_add(1, Ordering::SeqCst);
+    clear_frame();
+}
+
 /// Try to start a capture thread. `None` = no camera / permission / compile without `gaze`.
 pub fn start(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
-    CAM_STOP.store(false, Ordering::SeqCst);
     if crate::identity::env_flag_alias("BUCKYBOI_NO_CAMERA", "BUDDY_NO_CAMERA") {
         eprintln!("buckyboi: BUCKYBOI_NO_CAMERA set — skipping webcam");
+        request_stop();
         return None;
     }
+    let my_epoch = CAM_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    CAM_STOP.store(false, Ordering::SeqCst);
     #[cfg(feature = "gaze")]
     {
-        start_v4l(screen_w, screen_h)
+        start_v4l(screen_w, screen_h, my_epoch)
     }
     #[cfg(not(feature = "gaze"))]
     {
-        let _ = (screen_w, screen_h);
+        let _ = (screen_w, screen_h, my_epoch);
+        CAM_STOP.store(true, Ordering::SeqCst);
         eprintln!("buckyboi: compiled without `gaze` feature — no webcam");
         None
     }
@@ -120,7 +138,7 @@ fn negotiate_format(dev: &mut v4l::Device) -> Result<v4l::Format, String> {
 }
 
 #[cfg(feature = "gaze")]
-fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
+fn start_v4l(screen_w: f32, screen_h: f32, my_epoch: u64) -> Option<Receiver<CamGaze>> {
     use crate::gaze::{estimate_face_rgb, face_to_screen, yuyv_to_rgb};
     use std::sync::mpsc::{channel, sync_channel};
     use std::thread;
@@ -136,6 +154,15 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
     if thread::Builder::new()
         .name("buckyboi-cam".into())
         .spawn(move || {
+            struct ClearIfCurrent(u64);
+            impl Drop for ClearIfCurrent {
+                fn drop(&mut self) {
+                    if CAM_EPOCH.load(Ordering::SeqCst) == self.0 {
+                        clear_frame();
+                    }
+                }
+            }
+            let _clear = ClearIfCurrent(my_epoch);
             let mut dev = match Device::with_path(&path) {
                 Ok(d) => d,
                 Err(e) => {
@@ -172,7 +199,7 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
 
             let mut misses = 0u32;
             loop {
-                if CAM_STOP.load(Ordering::SeqCst) {
+                if CAM_EPOCH.load(Ordering::SeqCst) != my_epoch {
                     break;
                 }
                 let (buf, _meta) = match stream.next() {
@@ -182,6 +209,9 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
                         break;
                     }
                 };
+                if CAM_EPOCH.load(Ordering::SeqCst) != my_epoch {
+                    break;
+                }
                 let rgb = if fourcc == yuyv {
                     yuyv_to_rgb(buf, fw, fh)
                 } else if fourcc == mjpg {
@@ -230,6 +260,10 @@ fn start_v4l(screen_w: f32, screen_h: f32) -> Option<Receiver<CamGaze>> {
         .is_err()
     {
         eprintln!("buckyboi: could not spawn camera thread — no gaze");
+        if CAM_EPOCH.load(Ordering::SeqCst) == my_epoch {
+            CAM_STOP.store(true, Ordering::SeqCst);
+            clear_frame();
+        }
         return None;
     }
 
@@ -277,5 +311,21 @@ mod tests {
         let got = latest_frame().expect("stored");
         assert_eq!(got.t_ms, 7);
         assert!(Arc::ptr_eq(&got.rgb, &rgb));
+    }
+
+    #[test]
+    fn request_stop_bumps_epoch_and_clears_slot() {
+        let rgb: Arc<[u8]> = Arc::from(vec![1u8; 12]);
+        store_frame(CamFrame {
+            rgb,
+            w: 2,
+            h: 2,
+            t_ms: 99,
+        });
+        let before = CAM_EPOCH.load(Ordering::SeqCst);
+        request_stop();
+        assert!(CAM_STOP.load(Ordering::SeqCst));
+        assert!(CAM_EPOCH.load(Ordering::SeqCst) > before);
+        assert!(latest_frame().is_none());
     }
 }

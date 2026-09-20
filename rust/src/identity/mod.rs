@@ -26,9 +26,9 @@ pub use face::{
 };
 pub use gate::*;
 pub use hands::{
-    classify_gesture, classify_rules, classify_trained, extract_landmarks_onnx, extract_status,
-    gesture_centroid, models_present, GestureAction, GestureClass, GestureMap, GestureSample,
-    HandLandmarks, HandStatus, DEFAULT_GESTURE_MAP,
+    classify_gesture, classify_rules, classify_trained, extract_status, gesture_centroid,
+    models_present, GestureAction, GestureClass, GestureMap, GestureSample, HandLandmarks,
+    HandStatus, DEFAULT_GESTURE_MAP,
 };
 pub use persist::*;
 pub use voice::{
@@ -38,7 +38,7 @@ pub use voice::{
 pub use wizard::{FirstRunWizard, WizardEvent, WizardStep, LARGEST_FACE_CHIP};
 pub use worker::{
     latest_face, latest_hand, publishing_gaze, reload_rec, set_enrolling, set_gallery_kinds,
-    set_screen, stamp_if_due, start_vision_worker, watch_vision_worker, FaceSnap, HandSnap,
+    set_screen, start_vision_worker, watch_vision_worker, FaceSnap, HandSnap,
 };
 
 /// Vision / identity ONNX cadence (~12.5 Hz) so the overlay stays at 60 Hz.
@@ -78,4 +78,25 @@ pub fn env_flag(name: &str) -> bool {
 
 pub fn env_flag_alias(new: &str, old: &str) -> bool {
     env_flag(new) || env_flag(old)
+}
+
+/// Serialize `BUCKYBOI_MODELS` mutations across parallel tests.
+#[cfg(test)]
+pub(crate) fn with_models_dir<R>(dir: &std::path::Path, f: impl FnOnce() -> R) -> R {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("BUCKYBOI_MODELS").ok();
+    std::env::set_var("BUCKYBOI_MODELS", dir);
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(p) => std::env::set_var("BUCKYBOI_MODELS", p),
+                None => std::env::remove_var("BUCKYBOI_MODELS"),
+            }
+        }
+    }
+    let _restore = Restore(prev);
+    f()
 }

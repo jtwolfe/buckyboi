@@ -19,7 +19,6 @@ use buckyboi::{
     Settings, SettingsPage, UxEvent, WizardHits, HIT_RADIUS,
 };
 use std::env;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -190,7 +189,7 @@ fn identity_tick(
             *last_face_ms = snap.t_ms;
             wizard.note_faces(snap.quality.faces);
             if enroll_capturing(enroll, EnrollKind::Face) {
-                let _ = enroll.push_face(snap.quality, snap.embedding.clone());
+                let _ = enroll.push_face(snap.quality, snap.embedding);
             } else if let Some(emb) = snap.embedding {
                 if let Some(hit) = profiles.match_face(&emb) {
                     auth.note_face(&hit.person_id, &hit.name, now, hit.score);
@@ -1030,14 +1029,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if settings.camera {
                                 if !matches!(gaze_drive, GazeDrive::Mouse | GazeDrive::Chase { .. })
                                 {
-                                    camera::CAM_STOP.store(false, Ordering::SeqCst);
                                     gaze_drive = match camera::start(sw as f32, sh as f32) {
                                         Some(rx) => GazeDrive::Camera(rx),
                                         None => GazeDrive::Off,
                                     };
                                 }
                             } else {
-                                camera::CAM_STOP.store(true, Ordering::SeqCst);
+                                camera::request_stop();
                                 if matches!(gaze_drive, GazeDrive::Camera(_)) {
                                     gaze_drive = GazeDrive::Off;
                                 }

@@ -2,7 +2,7 @@
 
 use crate::identity::embed::Embedding;
 use crate::identity::enroll::EnrollKind;
-use crate::identity::face::{FaceLook, FaceQuality};
+use crate::identity::face::FaceQuality;
 use crate::identity::hands::HandStatus;
 #[cfg(any(test, feature = "face", feature = "hands", feature = "voice"))]
 use crate::identity::VISION_INFER_MS;
@@ -15,15 +15,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "face")]
 const LIVE_REC_MS: u64 = 160;
-#[cfg_attr(not(feature = "face"), allow(dead_code))]
-const SNAP_FRESH_MS: u64 = 400;
+#[cfg(any(feature = "face", feature = "hands", feature = "voice"))]
+const FRAME_FRESH_MS: u64 = 500;
 
 #[derive(Clone, Debug)]
 pub struct FaceSnap {
     pub t_ms: u64,
     pub quality: FaceQuality,
     pub embedding: Option<Embedding>,
-    pub look: Option<FaceLook>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,11 +36,6 @@ static HAND_SLOT: OnceLock<Mutex<Option<HandSnap>>> = OnceLock::new();
 static GALLERY_KINDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static HANDLE: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
-#[cfg_attr(
-    not(any(feature = "face", feature = "hands", feature = "voice")),
-    allow(dead_code)
-)]
-static WORKER_STOP: AtomicBool = AtomicBool::new(false);
 #[cfg_attr(
     not(any(feature = "face", feature = "hands", feature = "voice")),
     allow(dead_code)
@@ -95,7 +89,11 @@ fn publish_hand(snap: HandSnap) {
 }
 
 /// Stamp at slice start (miss or hit). Never rewrite after infer.
-pub fn stamp_if_due(last_ms: &mut u64, now: u64, period_ms: u64) -> bool {
+#[cfg_attr(
+    not(any(feature = "face", feature = "hands", feature = "voice")),
+    allow(dead_code)
+)]
+fn stamp_if_due(last_ms: &mut u64, now: u64, period_ms: u64) -> bool {
     if now.saturating_sub(*last_ms) >= period_ms {
         *last_ms = now;
         true
@@ -112,11 +110,11 @@ pub fn latest_hand() -> Option<HandSnap> {
     hand_slot().lock().ok().and_then(|g| g.clone())
 }
 
-/// Fresh SCRFD/skin look within 400 ms. No GazeSnap in PR1.
+/// Fresh SCRFD/skin look within the present consume window. No GazeSnap in PR1.
 pub fn publishing_gaze() -> bool {
     #[cfg(feature = "face")]
     {
-        crate::identity::face::latest_look(now_ms(), SNAP_FRESH_MS).is_some()
+        crate::identity::face::latest_look(now_ms(), crate::gaze::GAZE_GRACE_MS).is_some()
     }
     #[cfg(not(feature = "face"))]
     {
@@ -191,7 +189,6 @@ fn spawn_if_needed() {
             }
         }
     }
-    WORKER_STOP.store(false, Ordering::SeqCst);
     DEAD_LOGGED.store(false, Ordering::SeqCst);
     VISION_WORKER.store(true, Ordering::SeqCst);
     let intra = ort_intra();
@@ -270,9 +267,6 @@ fn vision_loop() {
     let mut nohand_since: Option<u64> = None;
 
     loop {
-        if WORKER_STOP.load(Ordering::SeqCst) {
-            break;
-        }
         let t0 = Instant::now();
         let now = now_ms();
 
@@ -287,7 +281,8 @@ fn vision_loop() {
             last_hb_log = now;
         }
 
-        let frame = crate::camera::latest_frame();
+        let frame =
+            crate::camera::latest_frame().filter(|f| now.saturating_sub(f.t_ms) <= FRAME_FRESH_MS);
 
         if stamp_if_due(&mut last_vis_ms, now, VISION_INFER_MS) {
             #[cfg(feature = "face")]
@@ -297,19 +292,17 @@ fn vision_loop() {
                 if rec_due {
                     last_rec_ms = now;
                 }
-                let (quality, embedding, look) =
+                let (quality, embedding) =
                     crate::identity::face::extract_parts(&frame.rgb, frame.w, frame.h, rec_due);
                 publish_face(FaceSnap {
                     t_ms: now,
                     quality,
                     embedding,
-                    look,
                 });
             }
 
             #[cfg(feature = "hands")]
             {
-                let _last_hand_infer_ms = now; // stamp before extract, miss or hit
                 let status = hand_status(frame.as_ref());
                 match &status {
                     HandStatus::NoHand => {
@@ -328,7 +321,6 @@ fn vision_loop() {
                     _ => nohand_since = None,
                 }
                 publish_hand(HandSnap { t_ms: now, status });
-                let _ = _last_hand_infer_ms;
             }
         }
 
@@ -373,7 +365,6 @@ mod tests {
             t_ms: 1234,
             quality: FaceQuality::reject(FaceReject::NoFace),
             embedding: None,
-            look: None,
         };
         publish_face(snap);
         let got = latest_face().expect("published");

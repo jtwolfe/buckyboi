@@ -424,14 +424,8 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("BUCKYBOI_MODELS").ok();
-        std::env::set_var("BUCKYBOI_MODELS", &dir);
         let s = tone(220.0, 1600, 0.2);
-        let (q, emb) = extract_embedding(&s, 16_000);
-        match prev {
-            Some(p) => std::env::set_var("BUCKYBOI_MODELS", p),
-            None => std::env::remove_var("BUCKYBOI_MODELS"),
-        }
+        let (q, emb) = crate::identity::with_models_dir(&dir, || extract_embedding(&s, 16_000));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(q.ok, "{q:?}");
         let emb = emb.expect("embed");
