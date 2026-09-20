@@ -2,8 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_FACE_THRESHOLD: f32 = 0.38;
-pub const DEFAULT_VOICE_THRESHOLD: f32 = 0.62;
+/// R50 working point. MBF should use 0.40 — see `face::face_cosine_threshold`.
+pub const DEFAULT_FACE_THRESHOLD: f32 = 0.35;
+/// Sherpa speaker manager search. Log-mel fallback is slightly higher (0.62).
+pub const DEFAULT_VOICE_THRESHOLD: f32 = 0.60;
 pub const DEFAULT_GESTURE_THRESHOLD: f32 = 0.78;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

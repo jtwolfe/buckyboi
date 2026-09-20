@@ -331,68 +331,242 @@ pub fn synthetic(class: GestureClass) -> HandLandmarks {
     HandLandmarks { pts }
 }
 
+pub fn palm_model_names() -> &'static [&'static str] {
+    &[
+        "palm_detection.onnx",
+        "palm_detection_mediapipe_2023feb.onnx",
+        "palm_detection_full.onnx",
+        "palm.onnx",
+    ]
+}
+
+pub fn landmark_model_names() -> &'static [&'static str] {
+    &[
+        "hand_landmark.onnx",
+        "handpose_estimation_mediapipe_2023feb.onnx",
+        "hand_landmark_full.onnx",
+        "hand_landmark_lite.onnx",
+    ]
+}
+
+/// Two-stage palm → landmark when `--features hands` and models exist.
 #[cfg(feature = "hands")]
+pub fn extract_landmarks_onnx(rgb: &[u8], w: u32, h: u32) -> Option<HandLandmarks> {
+    onnx::detect(rgb, w, h)
+}
+
+#[cfg(not(feature = "hands"))]
 pub fn extract_landmarks_onnx(_rgb: &[u8], _w: u32, _h: u32) -> Option<HandLandmarks> {
-    onnx::detect(_rgb, _w, _h)
+    None
 }
 
 #[cfg(feature = "hands")]
 mod onnx {
     use super::*;
     use crate::identity::models_dir;
+    use crate::identity::palm::{
+        decode_palms, nms_palms, palm_anchors_192, palm_to_roi, roi_to_frame, warp_roi_rgb, Anchor,
+        HAND_LANDMARK_SIZE, PALM_INPUT,
+    };
     use ndarray::Array4;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
-    struct Palm {
-        session: ort::session::Session,
+    const PALM_IN: usize = PALM_INPUT as usize;
+    const LM_IN: usize = HAND_LANDMARK_SIZE as usize;
+
+    struct Nets {
+        palm: ort::session::Session,
+        landmark: Option<ort::session::Session>,
+        anchors: Vec<Anchor>,
     }
 
-    static PALM: Mutex<Option<Palm>> = Mutex::new(None);
+    static NETS: Mutex<Option<Nets>> = Mutex::new(None);
+
+    fn find(names: &[&str]) -> Option<PathBuf> {
+        let dir = models_dir()?;
+        names.iter().map(|n| dir.join(n)).find(|p| p.is_file())
+    }
+
+    fn session() -> Option<()> {
+        let mut g = NETS.lock().ok()?;
+        if g.is_some() {
+            return Some(());
+        }
+        let palm_path = find(palm_model_names())?;
+        let palm = ort::session::Session::builder()
+            .ok()?
+            .commit_from_file(&palm_path)
+            .ok()?;
+        let landmark = find(landmark_model_names()).and_then(|p| {
+            ort::session::Session::builder()
+                .ok()?
+                .commit_from_file(&p)
+                .ok()
+        });
+        eprintln!(
+            "buckyboi: hands ONNX palm={} landmark={}",
+            palm_path.display(),
+            if landmark.is_some() { "yes" } else { "no" }
+        );
+        *g = Some(Nets {
+            palm,
+            landmark,
+            anchors: palm_anchors_192(),
+        });
+        Some(())
+    }
+
+    fn rgb_blob(rgb: &[u8], w: u32, h: u32, size: usize, scale_127: bool) -> Array4<f32> {
+        let mut blob = Array4::<f32>::zeros((1, 3, size, size));
+        if w == 0 || h == 0 {
+            return blob;
+        }
+        for y in 0..size {
+            let sy = (y as f32 * h as f32 / size as f32).clamp(0.0, h as f32 - 1.0) as u32;
+            for x in 0..size {
+                let sx = (x as f32 * w as f32 / size as f32).clamp(0.0, w as f32 - 1.0) as u32;
+                let i = ((sy * w + sx) * 3) as usize;
+                if i + 2 >= rgb.len() {
+                    continue;
+                }
+                let (r, g, b) = (rgb[i] as f32, rgb[i + 1] as f32, rgb[i + 2] as f32);
+                let (nr, ng, nb) = if scale_127 {
+                    ((r - 127.5) / 127.5, (g - 127.5) / 127.5, (b - 127.5) / 127.5)
+                } else {
+                    (r / 255.0, g / 255.0, b / 255.0)
+                };
+                blob[[0, 0, y, x]] = nr;
+                blob[[0, 1, y, x]] = ng;
+                blob[[0, 2, y, x]] = nb;
+            }
+        }
+        blob
+    }
+
+    fn collect_f32(outputs: &ort::session::SessionOutputs<'_>) -> Vec<Vec<f32>> {
+        let mut v = Vec::new();
+        for (_, t) in outputs.iter() {
+            if let Ok((_shape, data)) = t.try_extract_tensor::<f32>() {
+                v.push(data.to_vec());
+            }
+        }
+        v
+    }
+
+    fn landmarks_from_flat(data: &[f32], roi: Option<crate::identity::palm::HandRoi>) -> Option<HandLandmarks> {
+        if data.len() < 42 {
+            return None;
+        }
+        let trip = data.len() >= 63;
+        let mut pts = [(0.0, 0.0, 0.0); LANDMARKS];
+        for i in 0..LANDMARKS {
+            let (mut x, mut y, z) = if trip {
+                (data[i * 3], data[i * 3 + 1], data[i * 3 + 2])
+            } else {
+                (data[i * 2], data[i * 2 + 1], 0.0)
+            };
+            // Crop-pixel vs unit interval.
+            if x <= 1.5 && y <= 1.5 {
+                x *= LM_IN as f32;
+                y *= LM_IN as f32;
+            }
+            if let Some(roi) = roi {
+                let (fx, fy) = roi_to_frame(roi, LM_IN as f32, x, y);
+                pts[i] = (fx, fy, z);
+            } else {
+                pts[i] = (x, y, z);
+            }
+        }
+        Some(HandLandmarks { pts })
+    }
 
     pub fn detect(rgb: &[u8], w: u32, h: u32) -> Option<HandLandmarks> {
-        let dir = models_dir()?;
-        let path = ["palm_detection.onnx", "palm.onnx", "hand_landmark.onnx"]
-            .into_iter()
-            .map(|n| dir.join(n))
-            .find(|p| p.is_file())?;
-        {
-            let mut g = PALM.lock().ok()?;
-            if g.is_none() {
-                let sess = ort::session::Session::builder()
-                    .ok()?
-                    .commit_from_file(&path)
-                    .ok()?;
-                *g = Some(Palm { session: sess });
+        session()?;
+        let mut g = NETS.lock().ok()?;
+        let nets = g.as_mut()?;
+
+        let blob = rgb_blob(rgb, w, h, PALM_IN, true);
+        let input = ort::value::Tensor::from_array(blob).ok()?;
+        let outputs = nets.palm.run(ort::inputs![input]).ok()?;
+        let tensors = collect_f32(&outputs);
+
+        // Landmark-only file dropped in as "palm": 42/63 floats.
+        for t in &tensors {
+            if (t.len() == 63 || t.len() == 42) && nets.landmark.is_none() {
+                return landmarks_from_flat(t, None);
             }
-            let palm = g.as_mut()?;
-            // Many PINTO palm models want 192×192 or 224×224 RGB / 127.5 normalize.
-            let size = 192usize;
-            let mut blob = Array4::<f32>::zeros((1, 3, size, size));
-            for y in 0..size {
-                let sy = (y as f32 * h as f32 / size as f32).clamp(0.0, h as f32 - 1.0) as u32;
-                for x in 0..size {
-                    let sx = (x as f32 * w as f32 / size as f32).clamp(0.0, w as f32 - 1.0) as u32;
-                    let i = ((sy * w + sx) * 3) as usize;
-                    if i + 2 >= rgb.len() {
-                        continue;
+        }
+
+        let (regs, scores) = match tensors.len() {
+            0 => return None,
+            1 => {
+                // Some exports concat [N, 19] = 18 + score.
+                let t = &tensors[0];
+                if t.len() % 19 == 0 {
+                    let n = t.len() / 19;
+                    let mut r = Vec::with_capacity(n * 18);
+                    let mut s = Vec::with_capacity(n);
+                    for i in 0..n {
+                        r.extend_from_slice(&t[i * 19..i * 19 + 18]);
+                        s.push(t[i * 19 + 18]);
                     }
-                    blob[[0, 0, y, x]] = (rgb[i] as f32 - 127.5) / 127.5;
-                    blob[[0, 1, y, x]] = (rgb[i + 1] as f32 - 127.5) / 127.5;
-                    blob[[0, 2, y, x]] = (rgb[i + 2] as f32 - 127.5) / 127.5;
+                    (r, s)
+                } else {
+                    return None;
                 }
             }
+            _ => {
+                let a = &tensors[0];
+                let b = &tensors[1];
+                if a.len() >= b.len() * 8 {
+                    (a.clone(), b.clone())
+                } else {
+                    (b.clone(), a.clone())
+                }
+            }
+        };
+
+        let mut dets = decode_palms(&regs, &scores, &nets.anchors, PALM_IN as f32, 0.55);
+        // Scale letterboxed 192 coords back to the frame (stretch).
+        for d in &mut dets {
+            let sx = w as f32 / PALM_IN as f32;
+            let sy = h as f32 / PALM_IN as f32;
+            d.x *= sx;
+            d.y *= sy;
+            d.w *= sx;
+            d.h *= sy;
+            for k in &mut d.kps {
+                k.0 *= sx;
+                k.1 *= sy;
+            }
+        }
+        let dets = nms_palms(dets, 0.3);
+        let palm = dets.first()?;
+        let roi = palm_to_roi(palm, w as f32, h as f32);
+
+        if let Some(lm) = nets.landmark.as_mut() {
+            let crop = warp_roi_rgb(rgb, w, h, roi, LM_IN);
+            let blob = rgb_blob(&crop, LM_IN as u32, LM_IN as u32, LM_IN, true);
             let input = ort::value::Tensor::from_array(blob).ok()?;
-            let outputs = palm.session.run(ort::inputs![input]).ok()?;
-            // Landmark models often emit 63 floats (21×3) or 42 (21×2).
-            for (_, v) in outputs.iter() {
-                if let Ok((_shape, data)) = v.try_extract_tensor::<f32>() {
-                    if data.len() >= 42 {
-                        return HandLandmarks::from_flat(data);
-                    }
+            let outputs = lm.run(ort::inputs![input]).ok()?;
+            for t in collect_f32(&outputs) {
+                if t.len() >= 42 {
+                    return landmarks_from_flat(&t, Some(roi));
                 }
             }
         }
-        None
+
+        // Palm keypoints only: map 7 pts onto a coarse 21-pt skeleton so
+        // the rule classifier still has a wrist + MCP + tips to work with.
+        let mut pts = [(0.0, 0.0, 0.0); LANDMARKS];
+        pts[0] = (palm.kps[0].0, palm.kps[0].1, 0.0);
+        for (i, dst) in [5usize, 9, 13, 17].iter().enumerate() {
+            if i + 1 < palm.kps.len() {
+                pts[*dst] = (palm.kps[i + 1].0, palm.kps[i + 1].1, 0.0);
+            }
+        }
+        Some(HandLandmarks { pts })
     }
 }
 

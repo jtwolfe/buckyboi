@@ -34,9 +34,11 @@ All matching is **local and fail-closed**. Nothing leaves the machine.
 | `gate.rs` | `Off / Face / Voice / Any / All` | — |
 | `enroll.rs` | face / voice / gesture wizards | — |
 | `persist.rs` | `~/.config/buckyboi/profiles.json` | — |
-| `face.rs` | quality (area, brightness, Laplacian) + optional probe print | `face` → `ort` ArcFace ONNX |
-| `voice.rs` | log-mel 80-d speaker print + VAD-ish energy | `voice` → `cpal`; `voice-sherpa` |
-| `hands.rs` | 21-point rules + nearest-centroid calibration | `hands` → palm/landmark ONNX |
+| `align.rs` | InsightFace `arcface_dst` similarity + warpAffine | — |
+| `scrfd.rs` | letterbox / decode / NMS / largest-central pick | `face` → `ort` `det_10g.onnx` |
+| `face.rs` | quality + detect → align → embed | `face` → ArcFace ONNX |
+| `voice.rs` | log-mel 80-d speaker print + VAD-ish energy | `voice` → `cpal` + sherpa-onnx |
+| `palm.rs` / `hands.rs` | 21-point rules + nearest-centroid | `hands` → palm + landmark ONNX |
 
 Default `cargo run --release` is **gaze only** (V4L + overlay). Identity
 state machines still compile and are unit-tested without models, camera,
@@ -44,31 +46,44 @@ or a microphone.
 
 ### Face
 
-1. Detect a face (skin-blob used by gaze; SCRFD/det ONNX when you drop one in).
-2. Quality gates: area 4–85% of frame, brightness 40–230, Laplacian variance ≥ 12.
-3. Embed:
-   - `face` feature + `w600k_r50.onnx` / `w600k_mbf.onnx` → 512-d ArcFace (`kind=arcface`).
-   - else `BUCKYBOI_FACE_PROBE=1` → 32-d crop histogram (`kind=face-probe`). Prototype only.
+1. Detect (`det_10g.onnx` / SCRFD when `--features face` and the file
+   exists): bbox + 5 landmarks (L-eye, R-eye, nose, L-mouth, R-mouth).
+   Several faces → **largest / most central** (`area − 2·offset²`,
+   InsightFace default). Skin-blob box if no detector.
+2. **Align** with InsightFace `arcface_dst` (112×112 similarity /
+   `norm_crop`). Bbox resize only if landmarks are missing.
+3. Quality gates on the crop: area 4–85% of frame, brightness 40–230,
+   Laplacian variance ≥ 12. Settings ID shows **NO FACE / TOO DARK /
+   TOO BLURRY / TOO SMALL / TOO CLOSE / NO MODEL**.
+4. Embed:
+   - ArcFace `w600k_r50.onnx` / `w600k_mbf.onnx` → 512-d (`kind=arcface`),
+     BGR `(x-127.5)/128`. Cosine defaults **0.35** (R50) / **0.40** (MBF).
+   - else `BUCKYBOI_FACE_PROBE=1` → 32-d crop histogram (`kind=face-probe`).
+     Prototype only — opt-in and weak.
    - else **no embedding** (fail closed).
-4. Cosine vs stored vectors. Below threshold → unknown.
+5. Gaze look-target uses the SCRFD box when a detection is fresh;
+   otherwise the skin/iris proxy. Vision ONNX is throttled to ~12.5 Hz.
 
 Enrollment captures **8** accepted frames, then replaces that person’s face gallery.
 
 ### Voice
 
 1. Mono 16 kHz samples (`cpal` when `--features voice`, or `BUCKYBOI_VOICE_SIM`).
-2. Quality: ≥ 1.2 s and RMS energy ≥ 0.012.
-3. Embed: 40-band log-mel mean+std (80-d, `kind=logmel`), or sherpa-onnx speaker ONNX (`kind=sherpa`).
+2. Quality: ≥ 1.2 s and RMS energy ≥ 0.012. Rejects surface as
+   **TOO SHORT** / **TOO QUIET**.
+3. Embed: sherpa-onnx if an English CampPlus / ERes2Net file is present
+   (`kind=sherpa`, cosine **≈ 0.60**); else 40-band log-mel mean+std
+   (`kind=logmel`). `voice-sherpa` is an alias for `voice`.
 4. Cosine vs stored prints.
 
 Enrollment wants **3** utterances.
 
 ### Gestures
 
-MediaPipe-style 21 landmarks. Rules recognize fist / palm / thumbs-up / point / peace.
-Calibration stores per-class centroids (nearest-centroid / 1-NN). That is the
-trainable path without shipping an extra MLP ONNX; you can still drop
-PINTO/MediaPipe ONNX files for landmark extraction (`--features hands`).
+MediaPipe-style 21 landmarks. With `--features hands` and the OpenCV zoo
+/ PINTO ONNX files, landmarks come from **palm detection → rotated ROI
+→ hand landmark**. Rules + per-person centroids overlay that skeleton.
+Without models, `BUCKYBOI_HAND_SIM` still drives the classifier.
 
 Default map (overridable per person):
 
@@ -114,6 +129,7 @@ cargo test --manifest-path rust/Cargo.toml
 cargo test --manifest-path rust/Cargo.toml --no-default-features
 cargo run --release --manifest-path rust/Cargo.toml
 cargo run --release --manifest-path rust/Cargo.toml --features face,hands,voice
+# `voice` now includes sherpa-onnx; log-mel is used if no speaker ONNX is present
 ```
 
 Thin builds must keep working without models. ONNX crates are optional

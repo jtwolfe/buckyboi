@@ -268,7 +268,12 @@ impl ProfileStore {
             .iter()
             .map(|p| (p.id.clone(), p.name.clone(), p.face.clone()))
             .collect();
-        best_match(probe, &gal, self.file.face_threshold)
+        let model = crate::identity::face::loaded_rec_model_name();
+        let thresh = crate::identity::face::effective_face_threshold(
+            self.file.face_threshold,
+            model.as_deref(),
+        );
+        best_match(probe, &gal, thresh)
     }
 
     pub fn match_voice(&self, probe: &Embedding) -> Option<MatchHit> {
@@ -278,7 +283,21 @@ impl ProfileStore {
             .iter()
             .map(|p| (p.id.clone(), p.name.clone(), p.voice.clone()))
             .collect();
-        best_match(probe, &gal, self.file.voice_threshold)
+        let model = crate::identity::voice::pick_speaker_model(
+            crate::identity::models_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from(".")).as_path(),
+        );
+        let name = model
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str());
+        let thresh = crate::identity::voice::voice_cosine_threshold(name);
+        let thresh = if (self.file.voice_threshold - DEFAULT_VOICE_THRESHOLD).abs() < 1e-4 {
+            thresh
+        } else {
+            self.file.voice_threshold
+        };
+        best_match(probe, &gal, thresh)
     }
 
     pub fn enrolled_count(&self) -> usize {

@@ -5,7 +5,10 @@ use buckyboi::display::{
     bounds_rect, open_backend, paint_rect, send_command, BackendKind, FrameInput, WakeBus,
     WakeCommand,
 };
-use buckyboi::identity::{env_flag, env_flag_alias, env_or_alias, extract_face, hands, voice};
+use buckyboi::identity::{
+    env_flag, env_flag_alias, env_or_alias, extract_face, hands, latest_look, voice, VISION_INFER_MS,
+};
+use buckyboi::face_to_screen;
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
     initial_on, load_settings, overlay_bounds, save_settings, spin, step_overlay_avoid,
@@ -146,7 +149,7 @@ fn identity_tick(
     };
 
     if let Some(frame) = frame {
-        if now.saturating_sub(*last_face_ms) >= 180 {
+        if now.saturating_sub(*last_face_ms) >= VISION_INFER_MS {
             *last_face_ms = now;
             let (_q, emb) = extract_face(&frame.rgb, frame.w, frame.h);
             if matches!(enroll.kind, EnrollKind::Face)
@@ -194,7 +197,7 @@ fn identity_tick(
         }
     }
 
-    if now.saturating_sub(*last_hand_ms) >= 220 {
+    if now.saturating_sub(*last_hand_ms) >= VISION_INFER_MS {
         if let Some(hand) = current_hand() {
             *last_hand_ms = now;
             if matches!(enroll.kind, EnrollKind::Gesture)
@@ -246,7 +249,8 @@ fn current_hand() -> Option<hands::HandLandmarks> {
             return Some(hands::synthetic(cls));
         }
     }
-    None
+    let frame = camera::latest_frame()?;
+    hands::extract_landmarks_onnx(&frame.rgb, frame.w, frame.h)
 }
 
 fn apply_identity_action(
@@ -380,7 +384,8 @@ fn print_help() {
            buckyboi --quit     quit a running instance\n\n\
          Esc quits when the overlay has keyboard focus (X11: keymap poll).\n\
          On Wayland, also bind SUPER+Escape → `buckyboi --quit`.\n\n\
-         Features (cargo): gaze (default), face, hands, voice, voice-sherpa\n\n\
+         Features (cargo): gaze (default), face, hands, voice\n\
+         (`voice` includes sherpa-onnx; `voice-sherpa` is an alias)\n\n\
          Env:\n\
            WAYLAND_DISPLAY         prefer native Wayland layer-shell\n\
            DISPLAY                 X11 / XWayland fallback\n\
@@ -610,7 +615,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 while let Ok(s) = rx.try_recv() {
                     gaze_smooth.push(s.x, s.y, s.t_ms);
                 }
-                gaze_pt = gaze_smooth.current(now);
+                if let Some(look) = latest_look(now, 220) {
+                    let (sx, sy) = face_to_screen(
+                        look.cx,
+                        look.cy,
+                        look.fw,
+                        look.fh,
+                        sw as f32,
+                        sh as f32,
+                        true,
+                    );
+                    gaze_pt = Some(gaze_smooth.push(sx, sy, now));
+                } else {
+                    gaze_pt = gaze_smooth.current(now);
+                }
             }
             GazeDrive::Mouse => {
                 gaze_pt = Some(gaze_smooth.push(mx, my, now));

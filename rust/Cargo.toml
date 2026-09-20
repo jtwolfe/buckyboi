@@ -15,10 +15,10 @@ gaze = ["dep:v4l", "dep:image"]
 face = ["dep:ort", "dep:ndarray", "dep:image"]
 # ONNX palm / hand-landmark path (models downloaded separately).
 hands = ["dep:ort", "dep:ndarray", "dep:image"]
-# Live microphone via cpal. Speaker-print math always compiles.
-voice = ["dep:cpal"]
-# Optional sherpa-onnx SpeakerEmbeddingExtractor (needs the speaker ONNX).
-voice-sherpa = ["voice", "dep:sherpa-onnx"]
+# Live microphone via cpal + sherpa-onnx when a speaker ONNX is present.
+# Log-mel is the fallback if no model is on disk. `voice-sherpa` is an alias.
+voice = ["dep:cpal", "dep:sherpa-onnx"]
+voice-sherpa = ["voice"]
 
 [dependencies]
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "shape", "xfixes"] }
@@ -27,8 +27,8 @@ smithay-client-toolkit = { version = "0.19.2", default-features = false, feature
 libc = "0.2"
 v4l = { version = "0.14", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
-ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries"] }
-ndarray = { version = "0.16", optional = true }
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["std", "ndarray", "download-binaries", "tls-rustls"] }
+ndarray = { version = "0.17", optional = true }
 cpal = { version = "0.15", optional = true }
 sherpa-onnx = { version = "1.12", optional = true }
 serde = { version = "1", features = ["derive"] }

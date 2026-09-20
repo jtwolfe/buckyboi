@@ -22,10 +22,10 @@ keep thin builds working without ONNX or a mic.
    **Wayland** wlr-layer-shell on Hyprland / Omarchy, or **X11**
    Shape/XFixes), depth-sorted strokes, listening radial icons + settings,
    hide / wake, Esc quits.
-2. **Gaze** — webcam face/iris proxy → screen look-target; lazy avoid;
-   dwell → listen. Not a calibrated eye tracker. Face-ID boxes will
-   replace the skin blob when you enable `--features face` and drop in
-   an InsightFace detector (see [ROADMAP.md](ROADMAP.md)).
+2. **Gaze** — webcam look-target; lazy avoid; dwell → listen. Not a
+   calibrated eye tracker. With `--features face` and `det_10g.onnx`,
+   the look-target comes from the SCRFD face box (largest / most
+   central if several people are in frame). Skin blob is the fallback.
 3. **Multi-person identity** — enroll people under `~/.config/buckyboi/`.
    Cosine match, fail closed. No cloud.
 4. **Gating** — only enrolled people can start listen / sensitive
@@ -60,10 +60,10 @@ People and embeddings persist in `~/.config/buckyboi/profiles.json`.
 | Feature | Default | What it adds |
 | --- | --- | --- |
 | `gaze` | yes | V4L2 webcam (`v4l` + `image`) |
-| `face` | no | `ort` + ArcFace-style ONNX embeddings |
-| `hands` | no | `ort` + palm / landmark ONNX |
-| `voice` | no | `cpal` microphone |
-| `voice-sherpa` | no | `sherpa-onnx` SpeakerEmbeddingExtractor |
+| `face` | no | `ort` + SCRFD detect + 5-point align + ArcFace ONNX |
+| `hands` | no | `ort` + MediaPipe palm / landmark ONNX |
+| `voice` | no | `cpal` mic + sherpa-onnx speaker extract (if a model is present) |
+| `voice-sherpa` | no | alias for `voice` |
 
 ```bash
 # overlay + webcam gaze (no ONNX)
@@ -89,18 +89,31 @@ chmod +x scripts/download-models.sh
 
 | File in `~/.config/buckyboi/models/` | Used by |
 | --- | --- |
-| `w600k_r50.onnx` or `w600k_mbf.onnx` | `--features face` ArcFace |
-| `det_10g.onnx` | future SCRFD path (skin blob is used today) |
-| `3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx` | `--features voice-sherpa` |
-| `palm_detection.onnx` / `hand_landmark.onnx` | `--features hands` |
+| `det_10g.onnx` | `--features face` SCRFD (bbox + 5 landmarks) |
+| `w600k_r50.onnx` or `w600k_mbf.onnx` | `--features face` ArcFace after `norm_crop` |
+| `3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx` | `--features voice` sherpa (English default) |
+| `3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx` | EN fallback speaker net |
+| `palm_detection.onnx` / `hand_landmark.onnx` | `--features hands` MediaPipe ONNX |
 
-Without a face model, enrollment **fails closed** unless you opt into
-the weak probe print: `BUCKYBOI_FACE_PROBE=1`. That is a crop histogram,
-not InsightFace — documented so nobody mistakes it for a production
-biometric.
+Face path when both detector and rec nets are present: **detect →
+5-point similarity align (`arcface_dst` 112×112) → BGR `(x-127.5)/128`
+→ ArcFace**. A bbox-only resize is the degraded fallback if landmarks
+are missing. Cosine on L2-normalized embeddings; defaults **0.35**
+(R50) / **0.40** (MBF). Override with `face_threshold` in
+`profiles.json` or `BUCKYBOI_FACE_THRESHOLD`. Several faces: keep the
+**largest / most central** (InsightFace `area − 2·offset²`).
 
-Voice without sherpa still enrolls a **log-mel** print (real offline
-math, weaker than ERes2Net).
+InsightFace weights are **not** MIT. Read their license before
+redistributing `det_10g` / `w600k_*`. They are not vendored.
+
+Without a face rec model, enrollment **fails closed** unless you opt
+into the weak probe print: `BUCKYBOI_FACE_PROBE=1`. That is a crop
+histogram, not InsightFace.
+
+Voice: `--features voice` prefers sherpa when an English CampPlus /
+ERes2Net file is in the models dir (threshold **≈ 0.60**; enroll **3**
+utterances ≥ 1.2 s). `BUCKYBOI_MODELS_ZH=1` also pulls the ZH net.
+Log-mel is fallback only.
 
 ## Enrollment / calibration
 
@@ -199,7 +212,7 @@ wake on native Wayland — Omarchy uses Hyprland IPC + a hotkey (below).
 
 | Situation | What happens |
 | --- | --- |
-| `/dev/video0` readable (or `BUCKYBOI_CAMERA`) | Capture thread; skin + iris proxy → look-target; RGB stashed for identity |
+| `/dev/video0` readable (or `BUCKYBOI_CAMERA`) | Capture thread; SCRFD box (if `face` + `det_10g`) or skin/iris proxy → look-target; RGB stashed for identity. ONNX identity is throttled to ~12.5 Hz |
 | Device missing, busy, or `EACCES` | Log + mouse-avoid + click-to-listen. Overlay still runs |
 | `BUCKYBOI_NO_CAMERA=1` | Skip V4L |
 | No mic / no `voice` feature | Voice enroll waits for `BUCKYBOI_VOICE_SIM` or injected samples |
@@ -246,7 +259,8 @@ cargo test --manifest-path rust/Cargo.toml --no-default-features
 Headless: vertex/edge math, lock/clamp, overlay avoid, tap vs drag,
 listen timeout, gaze lock, face-blob + iris, radial hits, stroke
 occlusion, **cosine match / fail-closed**, **gate state machine**,
-**enroll wizards**, **log-mel voice print**, **gesture rules + centroids**.
+**enroll wizards**, **5-point align math**, **SCRFD decode**,
+**log-mel + speaker-path pick**, **gesture rules + centroids**.
 
 ```bash
 python3 python/test_sim.py          # historical window sim

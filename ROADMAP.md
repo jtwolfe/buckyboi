@@ -18,8 +18,8 @@ calendar estimates.
 
 ## C — Voice enroll / verify (done, prototype-honest)
 
-- Log-mel speaker print always compiled; `cpal` behind `--features voice`.
-- sherpa-onnx extractor behind `--features voice-sherpa` + downloaded model.
+- Log-mel speaker print always compiled; `cpal` + sherpa-onnx behind `--features voice`.
+- English CampPlus / ERes2Net is the download default; ZH is opt-in.
 - `BUCKYBOI_VOICE_SIM=1` tone path for headless / no-mic hosts.
 
 ## D — Gestures + calibration (done, prototype-honest)
@@ -41,10 +41,16 @@ calendar estimates.
 - X11 path kept (feature-detect + `BUCKYBOI_DISPLAY`).
 - Hidden wake: Hyprland `cursorpos` IPC, `$XDG_RUNTIME_DIR/buckyboi.sock`, SIGUSR1, `SUPER+B`.
 
+## G — Biometric quality (this tree)
+
+- SCRFD `det_10g` → 5-point `norm_crop` → ArcFace (bbox crop only if no landmarks).
+- Gaze look-target from the SCRFD box when a detection is fresh.
+- English sherpa speaker default; log-mel fallback; `voice` folds sherpa-onnx.
+- Real palm + landmark ONNX when `--features hands` and models exist.
+- Vision ONNX throttled to ~12.5 Hz; Settings ID shows TOO DARK / BLURRY / …
+
 ## Next (not blocking)
 
-- Face-aware gaze: drive `face_to_screen` from SCRFD boxes + 5-point align instead of the skin blob.
-- Landmark-aligned ArcFace (similarity transform to the 112×112 template).
 - First-run wizard that opens before the first listen when gate ≠ off and nobody is enrolled.
 - Multi-output follow (one layer per head, or follow the focused output).
 - Fractional-scale / `wp_viewporter` so HiDPI is sharp (v1 uses logical pixels).

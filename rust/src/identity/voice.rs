@@ -1,10 +1,16 @@
 //! Voice print: log-mel filterbank embedding + optional sherpa-onnx.
 //!
 //! The extractor is pure Rust and always compiled. Live capture needs the
-//! `voice` feature (`cpal`). A sherpa-onnx speaker model is used when the
-//! `voice-sherpa` feature is on *and* the ONNX file is present.
+//! `voice` feature (`cpal`). When `voice` is enabled, sherpa-onnx is linked
+//! and used automatically if an English (or any) speaker ONNX is present.
+//! `voice-sherpa` is a backward-compatible alias for `voice`.
+//!
+//! Default speaker model is CampPlus EN VoxCeleb 16 kHz (~28 MB). Log-mel
+//! remains the fallback when no sherpa model is on disk. Enroll 3 utterances
+//! ≥ 1.2 s. Sherpa cosine threshold ≈ 0.60 (tunable).
 
 use crate::identity::embed::Embedding;
+use std::path::{Path, PathBuf};
 
 pub const VOICE_ENROLL_NEED: usize = 3;
 pub const VOICE_MIN_MS: u32 = 1_200;
@@ -12,12 +18,33 @@ pub const VOICE_KIND_LOGMEL: &str = "logmel";
 pub const VOICE_KIND_SHERPA: &str = "sherpa";
 pub const VOICE_SAMPLE_RATE: u32 = 16_000;
 pub const MEL_BANDS: usize = 40;
+/// Cosine for sherpa-onnx speaker manager search (CampPlus / ERes2Net EN).
+pub const VOICE_THRESHOLD_SHERPA: f32 = 0.60;
+pub const VOICE_THRESHOLD_LOGMEL: f32 = 0.62;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceReject {
+    None,
+    TooShort,
+    TooQuiet,
+}
+
+impl VoiceReject {
+    pub fn hint(self) -> &'static str {
+        match self {
+            VoiceReject::None => "",
+            VoiceReject::TooShort => "TOO SHORT",
+            VoiceReject::TooQuiet => "TOO QUIET",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VoiceQuality {
     pub duration_ms: u32,
     pub energy: f32,
     pub ok: bool,
+    pub reject: VoiceReject,
 }
 
 impl VoiceQuality {
@@ -28,11 +55,54 @@ impl VoiceQuality {
             (samples.len() as u64 * 1000 / sample_rate as u64) as u32
         };
         let energy = speech_energy(samples);
+        let reject = if duration_ms < VOICE_MIN_MS {
+            VoiceReject::TooShort
+        } else if energy < 0.012 {
+            VoiceReject::TooQuiet
+        } else {
+            VoiceReject::None
+        };
         Self {
             duration_ms,
             energy,
-            ok: duration_ms >= VOICE_MIN_MS && energy >= 0.012,
+            ok: reject == VoiceReject::None,
+            reject,
         }
+    }
+}
+
+/// English CampPlus first, then EN ERes2Net, then bilingual / ZH leftovers.
+pub fn speaker_model_candidates() -> &'static [&'static str] {
+    &[
+        "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+        "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+        "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+        "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+        "wespeaker.onnx",
+        "speaker.onnx",
+    ]
+}
+
+pub fn pick_speaker_model(dir: &Path) -> Option<PathBuf> {
+    for name in speaker_model_candidates() {
+        let p = dir.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+pub fn voice_cosine_threshold(model_name: Option<&str>) -> f32 {
+    if let Some(v) = crate::identity::env_or_alias("BUCKYBOI_VOICE_THRESHOLD", "BUDDY_VOICE_THRESHOLD")
+    {
+        if let Ok(n) = v.parse::<f32>() {
+            return n.clamp(0.20, 0.95);
+        }
+    }
+    match model_name {
+        Some(_) => VOICE_THRESHOLD_SHERPA,
+        None => VOICE_THRESHOLD_LOGMEL,
     }
 }
 
@@ -148,7 +218,7 @@ pub fn extract_embedding(samples: &[f32], sample_rate: u32) -> (VoiceQuality, Op
     if !q.ok {
         return (q, None);
     }
-    #[cfg(feature = "voice-sherpa")]
+    #[cfg(any(feature = "voice", feature = "voice-sherpa"))]
     {
         if let Some(emb) = sherpa::embed(samples, sample_rate) {
             return (q, Some(emb));
@@ -290,26 +360,15 @@ pub mod capture {
     }
 }
 
-#[cfg(feature = "voice-sherpa")]
+#[cfg(any(feature = "voice", feature = "voice-sherpa"))]
 mod sherpa {
     use super::*;
     use crate::identity::models_dir;
 
     pub fn embed(samples: &[f32], sample_rate: u32) -> Option<Embedding> {
         let dir = models_dir()?;
-        let mut model = None;
-        for name in [
-            "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
-            "wespeaker.onnx",
-            "speaker.onnx",
-        ] {
-            let p = dir.join(name);
-            if p.is_file() {
-                model = Some(p.to_string_lossy().into_owned());
-                break;
-            }
-        }
-        let model = model?;
+        let model = pick_speaker_model(&dir)?;
+        let model = model.to_string_lossy().into_owned();
         let cfg = sherpa_onnx::SpeakerEmbeddingExtractorConfig {
             model: Some(model),
             num_threads: 1,
@@ -374,5 +433,36 @@ mod tests {
         let s = vec![1.0f32, -1.0, 1.0, -1.0];
         let out = to_mono_16k(&s, 2, 32_000);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn speaker_path_prefers_english() {
+        let dir = std::env::temp_dir().join(format!("buckyboi-spk-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let zh = dir.join("3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx");
+        let en = dir.join("3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx");
+        std::fs::write(&zh, b"zh").unwrap();
+        assert_eq!(
+            pick_speaker_model(&dir).unwrap().file_name().unwrap(),
+            zh.file_name().unwrap()
+        );
+        std::fs::write(&en, b"en").unwrap();
+        assert_eq!(
+            pick_speaker_model(&dir).unwrap().file_name().unwrap(),
+            en.file_name().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thresholds_and_reject_hints() {
+        assert!((voice_cosine_threshold(Some("campplus.onnx")) - 0.60).abs() < 1e-6);
+        assert!((voice_cosine_threshold(None) - 0.62).abs() < 1e-6);
+        let short = VoiceQuality::assess(&vec![0.2; 800], 16_000);
+        assert!(!short.ok);
+        assert_eq!(short.reject, VoiceReject::TooShort);
+        assert_eq!(short.reject.hint(), "TOO SHORT");
+        let quiet = VoiceQuality::assess(&vec![0.0001; 20_000], 16_000);
+        assert_eq!(quiet.reject, VoiceReject::TooQuiet);
     }
 }
