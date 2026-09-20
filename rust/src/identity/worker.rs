@@ -121,6 +121,19 @@ fn stamp_if_due(last_ms: &mut u64, now: u64, period_ms: u64) -> bool {
     }
 }
 
+/// Consume a one-shot vis skip (voice was deferred). Does not stamp `last_vis_ms`.
+#[cfg_attr(
+    not(any(feature = "face", feature = "hands", feature = "voice")),
+    allow(dead_code)
+)]
+fn should_run_vis(skip_vis: &mut bool, last_vis_ms: &mut u64, now: u64, period_ms: u64) -> bool {
+    if *skip_vis {
+        *skip_vis = false;
+        return false;
+    }
+    stamp_if_due(last_vis_ms, now, period_ms)
+}
+
 pub fn latest_face() -> Option<FaceSnap> {
     face_slot().lock().ok().and_then(|g| g.clone())
 }
@@ -277,8 +290,8 @@ fn hand_status(frame: Option<&crate::camera::CamFrame>) -> HandStatus {
     crate::identity::hands::extract_status(&frame.rgb, frame.w, frame.h)
 }
 
-/// Remainder of the vis cadence, or 0 when voice is due and this slice blew the 40 ms budget
-/// so the next loop skips vision and can embed.
+/// Remainder of the vis cadence, or 0 when voice is deferred so the follow-up loop
+/// (which also skips vis via `skip_vis`) can embed without waiting out 80 ms.
 #[cfg_attr(
     not(any(feature = "face", feature = "hands", feature = "voice")),
     allow(dead_code)
@@ -304,6 +317,8 @@ fn vision_loop() {
     let mut last_nohand_log = 0u64;
     #[cfg(feature = "hands")]
     let mut nohand_since: Option<u64> = None;
+    // After deferring voice, skip the next vis stamp so embed can run even if vis ≥ 80 ms.
+    let mut skip_vis = false;
 
     loop {
         let t0 = Instant::now();
@@ -323,7 +338,7 @@ fn vision_loop() {
         let frame =
             crate::camera::latest_frame().filter(|f| now.saturating_sub(f.t_ms) <= FRAME_FRESH_MS);
 
-        if stamp_if_due(&mut last_vis_ms, now, VISION_INFER_MS) {
+        if should_run_vis(&mut skip_vis, &mut last_vis_ms, now, VISION_INFER_MS) {
             #[cfg(feature = "face")]
             if let Some(ref frame) = frame {
                 let enrolling_face = ENROLLING_FACE.load(Ordering::Relaxed);
@@ -389,6 +404,7 @@ fn vision_loop() {
                     });
                 } else {
                     defer_voice = true;
+                    skip_vis = true;
                 }
             }
         }
@@ -413,6 +429,38 @@ mod tests {
         assert_eq!(vis_sleep_ms(50, false), VISION_INFER_MS - 50);
         assert_eq!(vis_sleep_ms(90, false), 0);
         assert_eq!(vis_sleep_ms(0, true), 0);
+    }
+
+    #[test]
+    fn skip_vis_one_shot_does_not_stamp_even_when_due() {
+        let mut skip = false;
+        let mut last = 0u64;
+        assert!(should_run_vis(
+            &mut skip,
+            &mut last,
+            VISION_INFER_MS,
+            VISION_INFER_MS
+        ));
+        assert_eq!(last, VISION_INFER_MS);
+
+        skip = true;
+        // Overrun: next loop is immediately due, but skip wins and must not stamp.
+        assert!(!should_run_vis(
+            &mut skip,
+            &mut last,
+            VISION_INFER_MS * 2,
+            VISION_INFER_MS
+        ));
+        assert_eq!(last, VISION_INFER_MS);
+        assert!(!skip);
+
+        assert!(should_run_vis(
+            &mut skip,
+            &mut last,
+            VISION_INFER_MS * 2,
+            VISION_INFER_MS
+        ));
+        assert_eq!(last, VISION_INFER_MS * 2);
     }
 
     #[test]
