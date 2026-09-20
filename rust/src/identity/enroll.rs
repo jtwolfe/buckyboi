@@ -1,7 +1,7 @@
 //! Enrollment / calibration state machines (pure, no camera or mic).
 
 use crate::identity::embed::Embedding;
-use crate::identity::face::{FaceQuality, FACE_ENROLL_NEED};
+use crate::identity::face::{FaceQuality, FaceReject, FACE_ENROLL_NEED};
 use crate::identity::hands::{GestureClass, HandStatus};
 use crate::identity::voice::{
     VoiceQuality, VoiceReject, VOICE_ENROLL_NEED, VOICE_ENROLL_REJECT_CAP,
@@ -241,9 +241,10 @@ impl EnrollSession {
             return EnrollEvent::None;
         }
         self.begin_capture();
-        if quality.reject == crate::identity::face::FaceReject::NoEmbed {
-            self.fail_now(quality.reject.hint());
-            return EnrollEvent::Failed;
+        // Missing ArcFace is `NoEmbed` (ok or not). Rec-skip snaps are
+        // ok + reject=None + no embedding — ignore, do not fail_now.
+        if quality.reject == FaceReject::NoEmbed {
+            return self.fail_now("NO MODEL");
         }
         if !quality.ok {
             self.note_reject(quality.reject.hint());
@@ -254,7 +255,6 @@ impl EnrollSession {
             return EnrollEvent::Rejected;
         }
         let Some(emb) = emb else {
-            // Live rec-skip leftover (ok quality, no vector) — do not burn the cap.
             return EnrollEvent::None;
         };
         self.last_reject = None;
@@ -585,24 +585,49 @@ mod tests {
     }
 
     #[test]
-    fn face_no_embed_fails_now_lighting_stays_cap() {
+    fn face_no_embed_fails_now_rec_skip_ignored() {
         let mut s = EnrollSession::start_face("Ada", None);
-        assert_eq!(s.push_face(ok_face(), None), EnrollEvent::Failed);
+        let no_model = FaceQuality {
+            ok: false,
+            reject: FaceReject::NoEmbed,
+            ..ok_face()
+        };
+        assert_eq!(s.push_face(no_model, None), EnrollEvent::Failed);
         assert!(matches!(
             s.phase,
             EnrollPhase::Failed { ref reason } if reason == "NO MODEL"
         ));
         assert_eq!(s.hint(), "NO MODEL");
+
+        let mut skip = EnrollSession::start_face("Ada", None);
+        let rec_skip = FaceQuality {
+            ok: true,
+            reject: FaceReject::None,
+            ..ok_face()
+        };
+        assert_eq!(skip.push_face(rec_skip, None), EnrollEvent::None);
+        assert!(!matches!(skip.phase, EnrollPhase::Failed { .. }));
+        assert_eq!(skip.rejects, 0);
+        assert!(skip.accepted.is_empty());
+
         let mut t = EnrollSession::start_face("Ada", None);
         let no_face = FaceQuality {
             ok: false,
-            reject: crate::identity::face::FaceReject::NoFace,
+            reject: FaceReject::NoFace,
             ..ok_face()
         };
         assert_eq!(t.push_face(no_face, None), EnrollEvent::Rejected);
         assert!(!matches!(t.phase, EnrollPhase::Failed { .. }));
         assert_eq!(t.hint(), "NO FACE");
         assert_eq!(t.rejects, 1);
+        let dark = FaceQuality {
+            ok: false,
+            reject: FaceReject::TooDark,
+            ..ok_face()
+        };
+        assert_eq!(t.push_face(dark, None), EnrollEvent::Rejected);
+        assert_eq!(t.rejects, 2);
+        assert!(!matches!(t.phase, EnrollPhase::Failed { .. }));
     }
 
     #[test]
