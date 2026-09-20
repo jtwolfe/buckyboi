@@ -224,6 +224,31 @@ fn dft_power(frame: &[f32], nfft: usize) -> Vec<f32> {
     out
 }
 
+#[cfg(any(feature = "voice", feature = "voice-sherpa"))]
+fn sherpa_in_process() -> bool {
+    // sherpa-onnx statically links its own ONNX Runtime. Loading it in the
+    // same process as `ort` (face/hands) corrupts ORT's type registry —
+    // ArcFace then fails with "GetElementType is not implemented" on Add.
+    #[cfg(any(feature = "face", feature = "hands"))]
+    {
+        if crate::identity::env_flag("BUCKYBOI_VOICE_SHERPA") {
+            return true;
+        }
+        use std::sync::Once;
+        static LOG: Once = Once::new();
+        LOG.call_once(|| {
+            eprintln!(
+                "buckyboi: voice log-mel (sherpa skipped — second ONNX Runtime breaks face/hands; set BUCKYBOI_VOICE_SHERPA=1 to force)"
+            );
+        });
+        false
+    }
+    #[cfg(not(any(feature = "face", feature = "hands")))]
+    {
+        true
+    }
+}
+
 pub fn extract_embedding(samples: &[f32], sample_rate: u32) -> (VoiceQuality, Option<Embedding>) {
     let q = VoiceQuality::assess(samples, sample_rate);
     if !q.ok {
@@ -231,8 +256,10 @@ pub fn extract_embedding(samples: &[f32], sample_rate: u32) -> (VoiceQuality, Op
     }
     #[cfg(any(feature = "voice", feature = "voice-sherpa"))]
     {
-        if let Some(emb) = sherpa::embed(samples, sample_rate) {
-            return (q, Some(emb));
+        if sherpa_in_process() {
+            if let Some(emb) = sherpa::embed(samples, sample_rate) {
+                return (q, Some(emb));
+            }
         }
     }
     (q, Some(logmel_embed(samples, sample_rate)))
@@ -618,13 +645,27 @@ mod tests {
         let s = tone(220.0, 1600, 0.2);
         crate::identity::with_models_dir(&dir, || {
             sherpa::reset_cache_for_test();
-            let (q1, _) = extract_embedding(&s, 16_000);
-            assert!(q1.ok, "{q1:?}");
+            let _ = sherpa::embed(&s, 16_000);
             assert_eq!(sherpa::create_calls(), 1);
-            let (q2, _) = extract_embedding(&s, 16_000);
-            assert!(q2.ok, "{q2:?}");
+            let _ = sherpa::embed(&s, 16_000);
             assert_eq!(sherpa::create_calls(), 1, "second embed must not create()");
         });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(
+        any(feature = "voice", feature = "voice-sherpa"),
+        any(feature = "face", feature = "hands")
+    ))]
+    #[test]
+    fn extract_embedding_skips_sherpa_when_face_or_hands() {
+        std::env::remove_var("BUCKYBOI_VOICE_SHERPA");
+        let s = tone(220.0, 1600, 0.2);
+        sherpa::reset_cache_for_test();
+        let (q, emb) = extract_embedding(&s, 16_000);
+        assert!(q.ok, "{q:?}");
+        assert_eq!(sherpa::create_calls(), 0, "sherpa must not load beside ort");
+        let emb = emb.expect("log-mel embed");
+        assert_eq!(emb.kind, VOICE_KIND_LOGMEL);
     }
 }

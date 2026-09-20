@@ -522,6 +522,7 @@ mod onnx {
     struct Rec {
         session: ort::session::Session,
         name: String,
+        input: String,
     }
 
     static REC: Mutex<Option<Rec>> = Mutex::new(None);
@@ -552,6 +553,7 @@ mod onnx {
             .unwrap_or("arcface")
             .to_string();
         let sess = crate::identity::ort_sess::session_from_file(&path)?;
+        let input = sess.inputs().first()?.name().to_string();
         let kind = rec_embed_kind(&name);
         if kind == FACE_KIND_ARCFACE && gallery_has_r50(&kinds) {
             eprintln!(
@@ -567,6 +569,7 @@ mod onnx {
         *recg = Some(Rec {
             session: sess,
             name,
+            input,
         });
         Some(())
     }
@@ -579,8 +582,15 @@ mod onnx {
         let rec = g.as_mut()?;
         let flat = arcface_blob_bgr(aligned_rgb, ARCFACE_SIZE);
         let blob = Array4::from_shape_vec((1, 3, ARCFACE_SIZE, ARCFACE_SIZE), flat).ok()?;
-        let input = ort::value::Tensor::from_array(blob).ok()?;
-        let outputs = rec.session.run(ort::inputs![input]).ok()?;
+        let tensor = ort::value::Tensor::from_array(blob).ok()?;
+        let iname = rec.input.clone();
+        let outputs = match rec.session.run(ort::inputs![iname.as_str() => tensor]) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("buckyboi: ArcFace run failed ({e})");
+                return None;
+            }
+        };
         let mut data = None;
         for (_, v) in outputs.iter() {
             if let Ok((_shape, slice)) = v.try_extract_tensor::<f32>() {

@@ -8,10 +8,10 @@ use buckyboi::display::{
 use buckyboi::face_to_screen;
 use buckyboi::identity::{
     camera_label, env_flag, env_flag_alias, env_or_alias, hands, latest_face, latest_gaze,
-    latest_hand, latest_look, latest_voice, reload_rec, set_calib, set_enrolling, set_gallery_kinds,
-    set_screen, skip_on_enroll_fail, start_mic, start_vision_worker, voice, watch_vision_worker,
-    wizard_auto_skip, CalibEvent, CalibFeat, FirstRunWizard, GazeCalib, GazeCalibSession,
-    HandStatus, WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
+    latest_hand, latest_look, latest_voice, reload_rec, set_calib, set_enrolling,
+    set_gallery_kinds, set_screen, skip_on_enroll_fail, start_mic, start_vision_worker, voice,
+    watch_vision_worker, wizard_auto_skip, CalibEvent, CalibFeat, FirstRunWizard, GazeCalib,
+    GazeCalibSession, HandStatus, WizardEvent, LARGEST_FACE_CHIP, VOICE_ENROLL_TIMEOUT_MS,
 };
 use buckyboi::{
     camera, chase_gaze, click_listening_ex, corner_on, gaze_over_hysteresis, hit_rects, hit_test,
@@ -525,6 +525,13 @@ fn apply_wizard_event(
     }
 }
 
+fn enroll_blocks_hide(enroll: &EnrollSession) -> bool {
+    !matches!(
+        enroll.phase,
+        EnrollPhase::Idle | EnrollPhase::Done { .. } | EnrollPhase::Failed { .. }
+    )
+}
+
 fn settle_enroll(
     now: u64,
     enroll: &mut EnrollSession,
@@ -908,7 +915,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             eprintln!("buckyboi: listening… (gesture palm)");
                         }
                     }
-                    GestureAction::Dismiss => {
+                    GestureAction::Dismiss
+                        if !menu.panel_open() && !enroll_blocks_hide(&enroll) =>
+                    {
                         ux.phase = Phase::Hidden;
                         eprintln!("buckyboi: dismiss (gesture)");
                     }
@@ -1342,7 +1351,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         | RadialAction::CancelEnroll => {}
                     }
                 }
-                if !menu.panel_open() && ux.tick(now) == UxEvent::Hide {
+                if !menu.panel_open()
+                    && !enroll_blocks_hide(&enroll)
+                    && ux.tick(now) == UxEvent::Hide
+                {
                     ux.phase = Phase::Hidden;
                 }
                 if ux.phase == Phase::Hidden {

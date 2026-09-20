@@ -260,7 +260,13 @@ mod onnx {
     use ndarray::Array4;
     use std::sync::Mutex;
 
-    static SESS: Mutex<Option<ort::session::Session>> = Mutex::new(None);
+    struct Net {
+        session: ort::session::Session,
+        input: String,
+        broken: bool,
+    }
+
+    static SESS: Mutex<Option<Net>> = Mutex::new(None);
     static LOGGED: Mutex<bool> = Mutex::new(false);
 
     fn session() -> Option<()> {
@@ -270,13 +276,18 @@ mod onnx {
         }
         let path = super::landmarker_path()?;
         let sess = crate::identity::ort_sess::session_from_file(&path)?;
+        let input = sess.inputs().first()?.name().to_string();
         if let Ok(mut logged) = LOGGED.lock() {
             if !*logged {
-                eprintln!("buckyboi: face landmarker 256×256 (478 iris)");
+                eprintln!("buckyboi: face landmarker 256×256 (478 iris) input={input}");
                 *logged = true;
             }
         }
-        *g = Some(sess);
+        *g = Some(Net {
+            session: sess,
+            input,
+            broken: false,
+        });
         Some(())
     }
 
@@ -313,12 +324,27 @@ mod onnx {
     pub fn infer(rgb: &[u8], w: u32, h: u32, face: &DetectedFace) -> Option<GazeFeat> {
         session()?;
         let mut g = SESS.lock().ok()?;
-        let sess = g.as_mut()?;
+        let net = g.as_mut()?;
+        if net.broken {
+            return None;
+        }
         let roi = face_roi(face);
         let crop = warp_roi_rgb(rgb, w, h, roi, LANDMARKER_SIZE as usize);
         let blob = rgb_blob(&crop, LANDMARKER_SIZE, LANDMARKER_SIZE);
         let input = ort::value::Tensor::from_array(blob).ok()?;
-        let outputs = sess.run(ort::inputs![input]).ok()?;
+        let name = net.input.clone();
+        let outputs = match net.session.run(ort::inputs![name.as_str() => input]) {
+            Ok(o) => o,
+            Err(e) => {
+                if !net.broken {
+                    eprintln!(
+                        "buckyboi: face landmarker failed ({e}) — gaze falls back to face-box"
+                    );
+                    net.broken = true;
+                }
+                return None;
+            }
+        };
         let mut best: Option<(Vec<(f32, f32, f32)>, bool)> = None;
         let mut score_ok = true;
         for (_, t) in outputs.iter() {
@@ -464,5 +490,96 @@ mod tests {
         assert!((feat.iris_nx - 0.5).abs() < 0.05);
         let no = feat_from_landmarks(&pts[..468], false, roi, 256.0, 256.0, 256.0);
         assert!(!no.ok && !no.iris_l && !no.iris_r);
+    }
+
+    #[test]
+    fn arcface_r50_session_probe_if_present() {
+        let dir = crate::identity::models_dir().unwrap();
+        let path = dir.join("w600k_r50.onnx");
+        if !path.is_file() {
+            return;
+        }
+        use ndarray::Array4;
+        use ort::session::builder::GraphOptimizationLevel;
+        use ort::session::Session;
+        let blob = Array4::<f32>::zeros((1, 3, 112, 112));
+        for (label, level) in [
+            ("disable", GraphOptimizationLevel::Disable),
+            ("l1", GraphOptimizationLevel::Level1),
+        ] {
+            let mut sess = Session::builder()
+                .unwrap()
+                .with_optimization_level(level)
+                .unwrap()
+                .with_intra_threads(1)
+                .unwrap()
+                .commit_from_file(&path)
+                .unwrap();
+            eprintln!(
+                "r50 {label} inputs {:?}",
+                sess.inputs()
+                    .iter()
+                    .map(|i| format!("{} {:?}", i.name(), i.dtype()))
+                    .collect::<Vec<_>>()
+            );
+            let t = ort::value::Tensor::from_array(blob.clone()).unwrap();
+            let name = sess.inputs()[0].name().to_string();
+            let msg = match sess.run(ort::inputs![name.as_str() => t]) {
+                Ok(_) => format!("r50 {label} named run ok"),
+                Err(e) => format!("r50 {label} named run err {e}"),
+            };
+            eprintln!("{msg}");
+        }
+    }
+
+    #[test]
+    fn landmarker_session_probe_if_present() {
+        let Some(path) = super::landmarker_path() else {
+            return;
+        };
+        use ndarray::Array4;
+        use ort::session::builder::GraphOptimizationLevel;
+        use ort::session::Session;
+        let blob = Array4::<f32>::zeros((1, 3, 256, 256));
+        for (label, level) in [
+            ("disable", GraphOptimizationLevel::Disable),
+            ("l1", GraphOptimizationLevel::Level1),
+        ] {
+            let mut sess = Session::builder()
+                .unwrap()
+                .with_optimization_level(level)
+                .unwrap()
+                .with_intra_threads(1)
+                .unwrap()
+                .commit_from_file(&path)
+                .unwrap();
+            eprintln!(
+                "landmarker {label} inputs {:?}",
+                sess.inputs()
+                    .iter()
+                    .map(|i| format!("{} {:?}", i.name(), i.dtype()))
+                    .collect::<Vec<_>>()
+            );
+            eprintln!(
+                "landmarker {label} outputs {:?}",
+                sess.outputs()
+                    .iter()
+                    .map(|o| format!("{} {:?}", o.name(), o.dtype()))
+                    .collect::<Vec<_>>()
+            );
+            let t = ort::value::Tensor::from_array(blob.clone()).unwrap();
+            let name = sess.inputs()[0].name().to_string();
+            let msg = match sess.run(ort::inputs![name.as_str() => t]) {
+                Ok(_) => format!("landmarker {label} named run ok"),
+                Err(e) => format!("landmarker {label} named run err {e}"),
+            };
+            eprintln!("{msg}");
+            let t2 = ort::value::Tensor::from_array(blob.clone()).unwrap();
+            let msg = match sess.run(ort::inputs![t2]) {
+                Ok(_) => format!("landmarker {label} positional run ok"),
+                Err(e) => format!("landmarker {label} positional run err {e}"),
+            };
+            eprintln!("{msg}");
+        }
     }
 }
